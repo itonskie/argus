@@ -36,6 +36,7 @@ export interface McpClient {
 }
 
 const INITIALIZE_TIMEOUT_MS = 5_000;
+const DEFAULT_INVOKE_TIMEOUT_MS = 30_000;
 const GRACEFUL_SHUTDOWN_WAIT_MS = 2_000;
 const SIGTERM_WAIT_MS = 1_000;
 const SIGKILL_WAIT_MS = 500;
@@ -51,6 +52,12 @@ type SdkPromptArgument = {
 	name: string;
 	description?: string;
 	required?: boolean;
+};
+
+type SdkCallToolResult = {
+	content?: unknown;
+	structuredContent?: unknown;
+	isError?: boolean;
 };
 
 type SdkClient = {
@@ -73,6 +80,7 @@ type SdkClient = {
 			arguments?: SdkPromptArgument[];
 		}>;
 	}>;
+	callTool(params: { name: string; arguments?: unknown }): Promise<SdkCallToolResult>;
 };
 
 function promptArgsToSchema(args: SdkPromptArgument[] | undefined): JSONSchema {
@@ -113,7 +121,34 @@ function normalizeConnectError(err: unknown): McpError {
 	return { kind: 'server-error', code: -32000, message };
 }
 
-function withInitializeTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function normalizeInvokeError(err: unknown): McpError {
+	// SDK's McpError shape: { code: number, message: string, data?: unknown }.
+	// We surface those directly. Anything else becomes a generic server-error.
+	if (isRecord(err) && typeof err.code === 'number' && typeof err.message === 'string') {
+		return {
+			kind: 'server-error',
+			code: err.code,
+			message: err.message,
+			data: err.data,
+		};
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	return { kind: 'server-error', code: -32000, message };
+}
+
+function extractErrorMessage(result: { content?: unknown }): string {
+	// isError: true results ship the error text as a `text` content block.
+	if (Array.isArray(result.content)) {
+		for (const block of result.content) {
+			if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') {
+				return block.text;
+			}
+		}
+	}
+	return 'tool returned an error';
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeoutPromise = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => {
@@ -160,7 +195,12 @@ function safeSignal(pid: number, signal: NodeJS.Signals): void {
 	}
 }
 
-export function createMcpClient(): McpClient {
+export type McpClientOptions = {
+	invokeTimeoutMs?: number;
+};
+
+export function createMcpClient(options: McpClientOptions = {}): McpClient {
+	const invokeTimeoutMs = options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
 	let transport: SdkTransport | null = null;
 	let client: SdkClient | null = null;
 	let connectedPid: number | null = null;
@@ -220,7 +260,7 @@ export function createMcpClient(): McpClient {
 			};
 
 			try {
-				await withInitializeTimeout(spawnedClient.connect(spawnedTransport), INITIALIZE_TIMEOUT_MS);
+				await withTimeout(spawnedClient.connect(spawnedTransport), INITIALIZE_TIMEOUT_MS);
 			} catch (err: unknown) {
 				const capturedPid = typeof spawnedTransport.pid === 'number' ? spawnedTransport.pid : null;
 				try {
@@ -293,8 +333,36 @@ export function createMcpClient(): McpClient {
 			});
 		},
 
-		async invoke(_name: string, _args: unknown): Promise<InvokeResult> {
-			throw new Error('not-implemented');
+		async invoke(name: string, args: unknown): Promise<InvokeResult> {
+			if (!client) {
+				return { ok: false, error: { kind: 'disconnected' } };
+			}
+			const activeClient = client;
+			try {
+				const result = await withTimeout(
+					activeClient.callTool({ name, arguments: args as Record<string, unknown> | undefined }),
+					invokeTimeoutMs,
+				);
+				if (result && result.isError === true) {
+					return {
+						ok: false,
+						error: {
+							kind: 'server-error',
+							code: -32603, // ErrorCode.InternalError — tool handler surfaced an error
+							message: extractErrorMessage(result),
+						},
+					};
+				}
+				return { ok: true, result };
+			} catch (err: unknown) {
+				if (isTimeoutMarker(err)) {
+					return { ok: false, error: { kind: 'timeout' } };
+				}
+				if (disconnectFired) {
+					return { ok: false, error: { kind: 'disconnected' } };
+				}
+				return { ok: false, error: normalizeInvokeError(err) };
+			}
 		},
 
 		async disconnect(): Promise<void> {

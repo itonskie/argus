@@ -20,6 +20,28 @@ server.registerTool(
 	}),
 );
 
+server.registerTool(
+	'boom',
+	{
+		description: 'Throws inside the handler — used to exercise the server-error path.',
+		inputSchema: {},
+	},
+	() => {
+		throw new Error('boom: intentional fixture failure');
+	},
+);
+
+// Never resolves — used to exercise the invoke() timeout path. A short
+// invokeTimeoutMs override on the client makes this practical to test.
+server.registerTool(
+	'slow',
+	{
+		description: 'Never resolves — used to exercise the invoke timeout path.',
+		inputSchema: {},
+	},
+	() => new Promise<never>(() => {}),
+);
+
 server.registerResource(
 	'greeting',
 	'argus://fixture/greeting',
