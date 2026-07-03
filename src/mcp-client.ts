@@ -14,6 +14,8 @@ export type Capability = {
 	name: string;
 	description?: string;
 	schema: JSONSchema;
+	uri?: string;
+	mimeType?: string;
 };
 
 export type McpError =
@@ -45,12 +47,49 @@ type SdkTransport = {
 	close(): Promise<void>;
 };
 
+type SdkPromptArgument = {
+	name: string;
+	description?: string;
+	required?: boolean;
+};
+
 type SdkClient = {
 	connect(transport: SdkTransport): Promise<void>;
 	listTools(): Promise<{
 		tools: Array<{ name: string; description?: string; inputSchema: unknown }>;
 	}>;
+	listResources(): Promise<{
+		resources: Array<{
+			name: string;
+			description?: string;
+			uri: string;
+			mimeType?: string;
+		}>;
+	}>;
+	listPrompts(): Promise<{
+		prompts: Array<{
+			name: string;
+			description?: string;
+			arguments?: SdkPromptArgument[];
+		}>;
+	}>;
 };
+
+function promptArgsToSchema(args: SdkPromptArgument[] | undefined): JSONSchema {
+	const properties: Record<string, JSONSchema> = {};
+	const required: string[] = [];
+	for (const arg of args ?? []) {
+		const field: JSONSchema = { type: 'string' };
+		if (typeof arg.description === 'string' && arg.description.length > 0) {
+			field.description = arg.description;
+		}
+		properties[arg.name] = field;
+		if (arg.required === true) required.push(arg.name);
+	}
+	const schema: JSONSchema = { type: 'object', properties };
+	if (required.length > 0) schema.required = required;
+	return schema;
+}
 
 type TimeoutMarker = { __argusTimeout: true };
 
@@ -223,11 +262,35 @@ export function createMcpClient(): McpClient {
 		},
 
 		async listResources(): Promise<Capability[]> {
-			throw new Error('not-implemented');
+			if (!client) {
+				throw { kind: 'disconnected' } satisfies McpError;
+			}
+			const response = await client.listResources();
+			return response.resources.map((r) => {
+				const cap: Capability = {
+					name: r.name,
+					schema: {},
+					uri: r.uri,
+				};
+				if (typeof r.description === 'string') cap.description = r.description;
+				if (typeof r.mimeType === 'string') cap.mimeType = r.mimeType;
+				return cap;
+			});
 		},
 
 		async listPrompts(): Promise<Capability[]> {
-			throw new Error('not-implemented');
+			if (!client) {
+				throw { kind: 'disconnected' } satisfies McpError;
+			}
+			const response = await client.listPrompts();
+			return response.prompts.map((p) => {
+				const cap: Capability = {
+					name: p.name,
+					schema: promptArgsToSchema(p.arguments),
+				};
+				if (typeof p.description === 'string') cap.description = p.description;
+				return cap;
+			});
 		},
 
 		async invoke(_name: string, _args: unknown): Promise<InvokeResult> {
