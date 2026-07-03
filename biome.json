@@ -8,7 +8,9 @@
 	"files": {
 		"includes": [
 			"src/**/*.ts",
+			"src/**/*.tsx",
 			"tests/**/*.ts",
+			"tests/**/*.tsx",
 			"*.config.ts",
 			"*.json",
 			"!package.json",
