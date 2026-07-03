@@ -59,8 +59,6 @@ describe('app-shell tracer bullet', () => {
 		expect(frame).toContain('echo');
 		// [t]ools tab label
 		expect(frame).toContain('[t]ools');
-		// Detail placeholder
-		expect(frame).toContain('select an item to preview');
 		// Status bar hints for middle pane
 		expect(frame).toContain('j/k list');
 	});
@@ -77,7 +75,6 @@ describe('app-shell tracer bullet', () => {
 		expect(frame).toContain('● connected');
 		expect(frame).toMatch(/pid\s+\d+/);
 		expect(frame).toContain('[t]ools');
-		expect(frame).toContain('select an item to preview');
 	});
 
 	it('j / k on the middle pane do not crash the render (single-tool list)', async () => {

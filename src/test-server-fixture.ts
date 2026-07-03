@@ -20,5 +20,41 @@ server.registerTool(
 	}),
 );
 
+server.registerResource(
+	'greeting',
+	'argus://fixture/greeting',
+	{
+		description: 'A static greeting resource served by the fixture.',
+		mimeType: 'text/plain',
+	},
+	async (uri) => ({
+		contents: [
+			{
+				uri: uri.href,
+				mimeType: 'text/plain',
+				text: 'hello from argus fixture',
+			},
+		],
+	}),
+);
+
+server.registerPrompt(
+	'greet',
+	{
+		description: 'Renders a greeting for the given name.',
+		argsSchema: {
+			name: z.string().describe('Person to greet.'),
+		},
+	},
+	({ name }) => ({
+		messages: [
+			{
+				role: 'user',
+				content: { type: 'text', text: `Say hello to ${name}.` },
+			},
+		],
+	}),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
