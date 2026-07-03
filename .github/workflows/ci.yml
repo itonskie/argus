@@ -39,3 +39,27 @@ jobs:
 
       - name: Verify bin --version
         run: node dist/argus.js --version
+
+  startup-budget:
+    name: Startup budget
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Measure cold-start-to-first-paint
+        run: node scripts/startup-budget.mjs
