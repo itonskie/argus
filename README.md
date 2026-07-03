@@ -54,6 +54,24 @@ pnpm test
 
 (Once scaffolded.)
 
+### Startup budget
+
+argus targets **< 200ms** cold-start-to-first-paint. `@modelcontextprotocol/sdk` and `ajv` must be loaded via dynamic `import()` inside the modules that use them, never at file top-level. See [ADR 2](./docs/adrs/2-lazy-load-heavyweight-deps.md).
+
+Run the check locally:
+
+```bash
+pnpm startup-budget
+```
+
+It builds the bundle, spawns `dist/argus.js` against the fixture five times, and reports the median wall-clock time from spawn to first byte on stdout. Exits 1 if median > 200ms. CI runs the same check on every PR.
+
+Debugging a regression:
+
+- Grep the entry (`src/argus.ts`) and any file it statically imports for top-level `import` of a heavyweight dep. Move it to a dynamic `import()` inside the function that needs it.
+- Use `import type { X }` for any type-only imports of a lazy-loaded module — otherwise TypeScript's emit pulls it in at runtime.
+- Anything that runs before Ink's first render belongs on a strict diet: argv parse, `statSync`, mount. That's it.
+
 ## License
 
 [MIT](./LICENSE)

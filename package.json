@@ -26,7 +26,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
-    "format": "biome check --write"
+    "format": "biome check --write",
+    "startup-budget": "pnpm build && node scripts/startup-budget.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
