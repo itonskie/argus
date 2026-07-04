@@ -162,6 +162,59 @@ function readArray(state: FormState, key: string): string[] {
 	return raw.map((v) => (typeof v === 'string' ? v : ''));
 }
 
+// Inverse of form-engine's assemblePayload: takes a submitted payload and
+// pushes each value back into the `FormState` shape the form renders from,
+// stringifying primitives / arrays / raw-JSON blobs. Used by arrow-up recall.
+function populateStateFromPayload(
+	field: FormField,
+	payloadNode: Record<string, unknown>,
+	state: FormState,
+): void {
+	const value = payloadNode[field.label];
+	const key = field.path.join('.');
+	const kind = field.fieldKind;
+	if (kind.kind === 'object') {
+		if (isRecord(value)) {
+			for (const child of kind.fields) populateStateFromPayload(child, value, state);
+		}
+		return;
+	}
+	if (kind.kind === 'array-of-primitives') {
+		if (Array.isArray(value)) {
+			state[key] = value.map((v) => String(v));
+		}
+		return;
+	}
+	if (kind.kind === 'raw-json') {
+		if (value !== undefined) {
+			state[key] = JSON.stringify(value, null, 2);
+		}
+		return;
+	}
+	if (value !== undefined) state[key] = String(value);
+}
+
+function payloadToFormState(spec: FormSpec, payload: unknown): FormState {
+	const state = initialStateFromSpec(spec);
+	if (!isRecord(payload)) return state;
+	for (const field of spec.fields) populateStateFromPayload(field, payload, state);
+	return state;
+}
+
+// The focused row's value is considered empty when its underlying `FormState`
+// slot is empty string / missing. Only then does ↑ trigger recall — non-empty
+// fields must not be clobbered by a stray arrow-key press.
+function isFocusedFieldEmpty(row: FocusRow, state: FormState): boolean {
+	const key = row.field.path.join('.');
+	if (row.kind === 'array-item') {
+		const arr = readArray(state, key);
+		return (arr[row.index] ?? '') === '';
+	}
+	if (row.kind === 'array-add') return true;
+	const v = state[key];
+	return typeof v !== 'string' || v === '';
+}
+
 // form-engine is lazy-loaded (ADR 2) — schemaToForm/submit both live behind
 // dynamic imports below.
 async function loadFormEngine(): Promise<{
@@ -177,6 +230,10 @@ export function App({ path }: AppProps): React.ReactElement {
 	const { stdin, setRawMode, isRawModeSupported } = useStdin();
 	const clientRef = useRef<McpClient | null>(null);
 	const shuttingDownRef = useRef(false);
+	// In-session last-args cache for ↑ recall (design-spec §4.2 / ADR 3).
+	// Ref, not state — we don't want re-renders when it moves; recall reads it
+	// synchronously inside the keypress handler.
+	const lastInvocationRef = useRef<{ tool: string; args: unknown } | null>(null);
 	const [connState, setConnState] = useState<ConnectionState>({ kind: 'connecting' });
 	const [tools, setTools] = useState<TabState>({
 		items: [],
@@ -368,6 +425,10 @@ export function App({ path }: AppProps): React.ReactElement {
 		} else {
 			invokeResult = await client.invoke(ctx.tool.name, result.payload);
 		}
+		if (invokeResult.ok) {
+			// Successful invocation seeds the ↑ recall slot for this tool.
+			lastInvocationRef.current = { tool: ctx.tool.name, args: result.payload };
+		}
 		setRightMode({ kind: 'result', ctx, result: invokeResult });
 		setResultScroll(0);
 	};
@@ -404,6 +465,18 @@ export function App({ path }: AppProps): React.ReactElement {
 				const delta = key.shift ? -1 : 1;
 				const next = (ctx.focusedFieldIndex + delta + rows.length) % rows.length;
 				setRightMode({ kind: 'form', ctx: { ...ctx, focusedFieldIndex: next } });
+				return;
+			}
+
+			// ↑ on an empty focused field → recall the last-invoked args for THIS
+			// tool. Non-empty fields ignore ↑ so we never overwrite user input.
+			// (design-spec §4.2)
+			if (key.upArrow) {
+				if (!isFocusedFieldEmpty(focusedRow, ctx.state)) return;
+				const last = lastInvocationRef.current;
+				if (!last || last.tool !== ctx.tool.name) return;
+				const nextState = payloadToFormState(ctx.spec, last.args);
+				setRightMode({ kind: 'form', ctx: { ...ctx, state: nextState, errors: [] } });
 				return;
 			}
 
@@ -1179,7 +1252,7 @@ function StatusBar({
 }): React.ReactElement {
 	let hints: string;
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
-		hints = 'tab/shift-tab fields  enter submit  esc cancel  q quit';
+		hints = 'tab/shift-tab fields  enter submit  esc cancel  ↑ last args  q quit';
 	} else if (rightMode.kind === 'result') {
 		hints = 'j/k scroll  o open in $PAGER  esc back to form  h back  q quit';
 	} else if (focusedPane === 'left') {
