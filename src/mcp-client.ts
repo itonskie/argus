@@ -21,7 +21,7 @@ export type Capability = {
 export type McpError =
 	| { kind: 'server-error'; code: number; message: string; data?: unknown }
 	| { kind: 'timeout' }
-	| { kind: 'disconnected' };
+	| { kind: 'disconnected'; exitCode?: number | null; signal?: NodeJS.Signals | null };
 
 export type InvokeResult = { ok: true; result: unknown } | { ok: false; error: McpError };
 
@@ -46,6 +46,13 @@ type SdkTransport = {
 	onclose?: () => void;
 	onerror?: (err: Error) => void;
 	close(): Promise<void>;
+	// SDK-internal — reached into to capture (exitCode, signal) on unexpected
+	// child exit. The SDK's `onclose` callback discards both, so this is our
+	// only hook. Guarded — if the SDK ever renames or removes this field the
+	// exit-info capture degrades to `undefined` rather than breaking.
+	_process?: {
+		on(event: 'exit', cb: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+	};
 };
 
 type SdkPromptArgument = {
@@ -206,6 +213,8 @@ export function createMcpClient(options: McpClientOptions = {}): McpClient {
 	let connectedPid: number | null = null;
 	let disconnectInitiated = false;
 	let disconnectFired = false;
+	let capturedExitCode: number | null | undefined;
+	let capturedSignal: NodeJS.Signals | null | undefined;
 	const disconnectListeners: Array<(reason: McpError) => void> = [];
 
 	const fireDisconnect = (reason: McpError): void => {
@@ -227,6 +236,8 @@ export function createMcpClient(options: McpClientOptions = {}): McpClient {
 			}
 			disconnectInitiated = false;
 			disconnectFired = false;
+			capturedExitCode = undefined;
+			capturedSignal = undefined;
 
 			const [clientMod, stdioMod] = await Promise.all([
 				import('@modelcontextprotocol/sdk/client/index.js'),
@@ -255,7 +266,10 @@ export function createMcpClient(options: McpClientOptions = {}): McpClient {
 
 			spawnedTransport.onclose = () => {
 				if (!disconnectInitiated) {
-					fireDisconnect({ kind: 'disconnected' });
+					const reason: McpError = { kind: 'disconnected' };
+					if (capturedExitCode !== undefined) reason.exitCode = capturedExitCode;
+					if (capturedSignal !== undefined) reason.signal = capturedSignal;
+					fireDisconnect(reason);
 				}
 			};
 
@@ -286,6 +300,16 @@ export function createMcpClient(options: McpClientOptions = {}): McpClient {
 			transport = spawnedTransport;
 			client = spawnedClient;
 			connectedPid = typeof spawnedTransport.pid === 'number' ? spawnedTransport.pid : -1;
+			// The SDK's `onclose` callback discards the child's exit info; hook
+			// the underlying process here so `disconnected` errors can carry
+			// `exitCode` / `signal` for the UI (design-spec §3.1 red block).
+			const childProcess = spawnedTransport._process;
+			if (childProcess && typeof childProcess.on === 'function') {
+				childProcess.on('exit', (code, signal) => {
+					capturedExitCode = code;
+					capturedSignal = signal;
+				});
+			}
 			return { path: inputPath, transport: 'stdio', pid: connectedPid };
 		},
 
@@ -293,44 +317,56 @@ export function createMcpClient(options: McpClientOptions = {}): McpClient {
 			if (!client) {
 				throw { kind: 'disconnected' } satisfies McpError;
 			}
-			const response = await client.listTools();
-			return response.tools.map((t) => ({
-				name: t.name,
-				description: t.description,
-				schema: (t.inputSchema ?? {}) as JSONSchema,
-			}));
+			try {
+				const response = await client.listTools();
+				return response.tools.map((t) => ({
+					name: t.name,
+					description: t.description,
+					schema: (t.inputSchema ?? {}) as JSONSchema,
+				}));
+			} catch (err) {
+				throw normalizeInvokeError(err);
+			}
 		},
 
 		async listResources(): Promise<Capability[]> {
 			if (!client) {
 				throw { kind: 'disconnected' } satisfies McpError;
 			}
-			const response = await client.listResources();
-			return response.resources.map((r) => {
-				const cap: Capability = {
-					name: r.name,
-					schema: {},
-					uri: r.uri,
-				};
-				if (typeof r.description === 'string') cap.description = r.description;
-				if (typeof r.mimeType === 'string') cap.mimeType = r.mimeType;
-				return cap;
-			});
+			try {
+				const response = await client.listResources();
+				return response.resources.map((r) => {
+					const cap: Capability = {
+						name: r.name,
+						schema: {},
+						uri: r.uri,
+					};
+					if (typeof r.description === 'string') cap.description = r.description;
+					if (typeof r.mimeType === 'string') cap.mimeType = r.mimeType;
+					return cap;
+				});
+			} catch (err) {
+				throw normalizeInvokeError(err);
+			}
 		},
 
 		async listPrompts(): Promise<Capability[]> {
 			if (!client) {
 				throw { kind: 'disconnected' } satisfies McpError;
 			}
-			const response = await client.listPrompts();
-			return response.prompts.map((p) => {
-				const cap: Capability = {
-					name: p.name,
-					schema: promptArgsToSchema(p.arguments),
-				};
-				if (typeof p.description === 'string') cap.description = p.description;
-				return cap;
-			});
+			try {
+				const response = await client.listPrompts();
+				return response.prompts.map((p) => {
+					const cap: Capability = {
+						name: p.name,
+						schema: promptArgsToSchema(p.arguments),
+					};
+					if (typeof p.description === 'string') cap.description = p.description;
+					return cap;
+				});
+			} catch (err) {
+				throw normalizeInvokeError(err);
+			}
 		},
 
 		async invoke(name: string, args: unknown): Promise<InvokeResult> {
