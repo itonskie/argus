@@ -1,7 +1,8 @@
 import { basename } from 'node:path';
-import { Box, Text, useApp, useInput, useStdin } from 'ink';
+import { Box, Text, useApp, useInput, useStdin, useWindowSize } from 'ink';
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { readUiEnv, type UiEnv } from './env.js';
 import type { FormField, FormFieldKind, FormSpec, FormState, SubmitResult } from './form-engine.js';
 import {
 	type Capability,
@@ -14,6 +15,33 @@ import {
 } from './mcp-client.js';
 import { spawnPager } from './pager.js';
 import { ResultView, serializeResultForPager } from './result-view.js';
+import { Spinner } from './spinner.js';
+
+const MIN_COLUMNS = 80;
+const MIN_ROWS = 24;
+
+// design-spec §1: three axes of border style — ARGUS_ASCII takes precedence,
+// then NO_COLOR uses bold-style Unicode to distinguish focus without color,
+// else the default single-line borders (with cyan focus color).
+function borderStyleFor(env: UiEnv, focused: boolean): 'classic' | 'single' | 'bold' {
+	if (env.ascii) return 'classic';
+	if (env.noColor && focused) return 'bold';
+	return 'single';
+}
+
+// Focus color — cyan when we have color, undefined otherwise (design-spec §1).
+function focusBorderColor(env: UiEnv, focused: boolean): string | undefined {
+	if (!focused) return undefined;
+	if (env.noColor) return undefined;
+	return 'cyan';
+}
+
+// Any semantic color goes through this — NO_COLOR strips it, everything else
+// passes through unchanged. The paired text prefix (`error:`, `● connected`,
+// etc.) is what carries the meaning without color.
+function semanticColor(env: UiEnv, color: string): string | undefined {
+	return env.noColor ? undefined : color;
+}
 
 type ConnectionState =
 	| { kind: 'connecting' }
@@ -51,6 +79,8 @@ type FormCtx = {
 
 export type AppProps = {
 	path: string;
+	// Injectable for tests; production callers omit and we read the live env.
+	env?: NodeJS.ProcessEnv;
 };
 
 function truncate(s: string, max: number): string {
@@ -240,9 +270,11 @@ async function loadFormEngine(): Promise<{
 	return { schemaToForm: mod.schemaToForm, submit: mod.submit };
 }
 
-export function App({ path }: AppProps): React.ReactElement {
+export function App({ path, env }: AppProps): React.ReactElement {
 	const { exit } = useApp();
 	const { stdin, setRawMode, isRawModeSupported } = useStdin();
+	const { columns, rows } = useWindowSize();
+	const uiEnv: UiEnv = useMemo(() => readUiEnv(env), [env]);
 	const clientRef = useRef<McpClient | null>(null);
 	const shuttingDownRef = useRef(false);
 	// In-session last-args cache for ↑ recall (design-spec §4.2 / ADR 3).
@@ -750,15 +782,28 @@ export function App({ path }: AppProps): React.ReactElement {
 			? activeTabState.items[activeTabState.selectedIndex]
 			: undefined;
 
+	// design-spec §2.3: below 80×24 we replace the layout with a single-line
+	// gate. State stays mounted (App itself doesn't unmount), so focus /
+	// selection are preserved when the terminal grows back.
+	if (columns < MIN_COLUMNS || rows < MIN_ROWS) {
+		return <SizeGate columns={columns} rows={rows} />;
+	}
+
 	return (
 		<Box flexDirection="column">
 			<Box flexDirection="row">
-				<ConnectionPane path={path} connState={connState} focused={focusedPane === 'left'} />
+				<ConnectionPane
+					path={path}
+					connState={connState}
+					focused={focusedPane === 'left'}
+					env={uiEnv}
+				/>
 				<CapabilitiesPane
 					activeTab={activeTab}
 					tabState={activeTabState}
 					focused={focusedPane === 'middle'}
 					connState={connState}
+					env={uiEnv}
 				/>
 				<DetailPane
 					focused={focusedPane === 'right'}
@@ -768,10 +813,24 @@ export function App({ path }: AppProps): React.ReactElement {
 					rightMode={rightMode}
 					resultScroll={resultScroll}
 					connState={connState}
+					env={uiEnv}
 				/>
 			</Box>
-			<StatusBar focusedPane={focusedPane} connState={connState} rightMode={rightMode} />
+			<StatusBar
+				focusedPane={focusedPane}
+				connState={connState}
+				rightMode={rightMode}
+				env={uiEnv}
+			/>
 		</Box>
+	);
+}
+
+function SizeGate({ columns, rows }: { columns: number; rows: number }): React.ReactElement {
+	return (
+		<Text>
+			argus requires 80×24 terminal — current: {columns}x{rows}
+		</Text>
 	);
 }
 
@@ -779,32 +838,35 @@ function ConnectionPane({
 	path,
 	connState,
 	focused,
+	env,
 }: {
 	path: string;
 	connState: ConnectionState;
 	focused: boolean;
+	env: UiEnv;
 }): React.ReactElement {
+	const bStyle = borderStyleFor(env, focused);
 	if (connState.kind === 'error') {
 		return (
 			<Box
-				borderStyle="single"
-				borderColor={focused ? 'cyan' : 'red'}
+				borderStyle={bStyle}
+				borderColor={env.noColor ? undefined : focused ? 'cyan' : 'red'}
 				width={18}
 				flexDirection="column"
 				paddingX={1}
 			>
-				<Text bold={focused} underline={focused} color="red">
+				<Text bold={focused} underline={focused} color={semanticColor(env, 'red')}>
 					Connection
 				</Text>
-				<ErrorBlock error={connState.error} />
-				<Text color="red">q to quit</Text>
+				<ErrorBlock error={connState.error} env={env} />
+				<Text color={semanticColor(env, 'red')}>q to quit</Text>
 			</Box>
 		);
 	}
 	return (
 		<Box
-			borderStyle="single"
-			borderColor={focused ? 'cyan' : undefined}
+			borderStyle={bStyle}
+			borderColor={focusBorderColor(env, focused)}
 			width={18}
 			flexDirection="column"
 			paddingX={1}
@@ -816,34 +878,40 @@ function ConnectionPane({
 			<Text>stdio</Text>
 			{connState.kind === 'connected' && (
 				<>
-					<Text color="green">● connected</Text>
+					<Text color={semanticColor(env, 'green')}>● connected</Text>
 					<Text>pid {connState.info.pid}</Text>
 				</>
 			)}
-			{connState.kind === 'connecting' && <Text color="yellow">● connecting</Text>}
+			{connState.kind === 'connecting' && (
+				<Box flexDirection="row">
+					<Spinner env={env} />
+					<Text color={semanticColor(env, 'yellow')}> ● connecting</Text>
+				</Box>
+			)}
 		</Box>
 	);
 }
 
-function ErrorBlock({ error }: { error: McpError }): React.ReactElement {
+function ErrorBlock({ error, env }: { error: McpError; env: UiEnv }): React.ReactElement {
 	// design-spec §3.1 wording, matched verbatim: `error:` prefix pairs with red
 	// text so state is distinguishable without color (design-spec §6).
+	const color = semanticColor(env, 'red');
 	if (error.kind === 'timeout') {
 		return (
-			<Text color="red" bold>
+			<Text color={color} bold>
 				error: server did not respond to initialize within 5s
 			</Text>
 		);
 	}
 	if (error.kind === 'disconnected') {
 		return (
-			<Text color="red" bold>
+			<Text color={color} bold>
 				error: server exited ({formatExitDetail(error)}) — invocations disabled
 			</Text>
 		);
 	}
 	return (
-		<Text color="red" bold>
+		<Text color={color} bold>
 			error: {error.message}
 		</Text>
 	);
@@ -865,11 +933,13 @@ function CapabilitiesPane({
 	tabState,
 	focused,
 	connState,
+	env,
 }: {
 	activeTab: Tab;
 	tabState: TabState;
 	focused: boolean;
 	connState: ConnectionState;
+	env: UiEnv;
 }): React.ReactElement {
 	const kindLabel: Record<Tab, string> = {
 		tools: 'tools',
@@ -881,11 +951,12 @@ function CapabilitiesPane({
 	// failure). Mid-session `disconnected` leaves the list visible so the user can
 	// still read what they were browsing.
 	const disabledByInitError = connState.kind === 'error' && connState.error.kind !== 'disconnected';
+	const redColor = semanticColor(env, 'red');
 
 	return (
 		<Box
-			borderStyle="single"
-			borderColor={focused ? 'cyan' : undefined}
+			borderStyle={borderStyleFor(env, focused)}
+			borderColor={focusBorderColor(env, focused)}
 			width={24}
 			flexDirection="column"
 			paddingX={1}
@@ -901,14 +972,17 @@ function CapabilitiesPane({
 				</Box>
 			)}
 			{!disabledByInitError && shouldShowLoading && (
-				<Text dimColor>loading {kindLabel[activeTab]}…</Text>
+				<Box flexDirection="row">
+					<Spinner env={env} />
+					<Text dimColor> loading {kindLabel[activeTab]}…</Text>
+				</Box>
 			)}
 			{!disabledByInitError && !shouldShowLoading && tabState.status === 'error' && (
 				<>
-					<Text color="red" bold>
+					<Text color={redColor} bold>
 						failed to list {kindLabel[activeTab]}: {tabState.errorMessage ?? 'unknown error'}
 					</Text>
-					<Text color="red">r to retry</Text>
+					<Text color={redColor}>r to retry</Text>
 				</>
 			)}
 			{!disabledByInitError &&
@@ -944,6 +1018,7 @@ function DetailPane({
 	rightMode,
 	resultScroll,
 	connState,
+	env,
 }: {
 	focused: boolean;
 	activeTab: Tab;
@@ -952,6 +1027,7 @@ function DetailPane({
 	rightMode: RightMode;
 	resultScroll: number;
 	connState: ConnectionState;
+	env: UiEnv;
 }): React.ReactElement {
 	// design-spec §4.3: an initialize-time error hides right-pane content — the
 	// user should only see the left-pane red block. Mid-session `disconnected`
@@ -966,8 +1042,8 @@ function DetailPane({
 				: 'Detail';
 	return (
 		<Box
-			borderStyle="single"
-			borderColor={focused ? 'cyan' : undefined}
+			borderStyle={borderStyleFor(env, focused)}
+			borderColor={focusBorderColor(env, focused)}
 			flexGrow={1}
 			flexDirection="column"
 			paddingX={1}
@@ -986,6 +1062,7 @@ function DetailPane({
 					ctx={rightMode.ctx}
 					invoking={rightMode.kind === 'invoking'}
 					disconnected={disconnected}
+					env={env}
 				/>
 			)}
 			{!initializeErrored && rightMode.kind === 'result' && (
@@ -1062,21 +1139,25 @@ function FormBody({
 	ctx,
 	invoking,
 	disconnected,
+	env,
 }: {
 	ctx: FormCtx;
 	invoking: boolean;
 	disconnected: boolean;
+	env: UiEnv;
 }): React.ReactElement {
 	// design-spec §3.4: server-crash form-disabled state renders the same as
 	// invoking (fields dim, no cursor) but with the explicit disconnected footer.
 	const locked = invoking || disconnected;
+	const redColor = semanticColor(env, 'red');
+	const yellowColor = semanticColor(env, 'yellow');
 	if (ctx.spec.fields.length === 0) {
 		return (
 			<>
 				<Text bold>{ctx.tool.name}</Text>
 				<Text dimColor>(no arguments)</Text>
 				{disconnected ? (
-					<Text color="red" bold>
+					<Text color={redColor} bold>
 						server disconnected — cannot invoke
 					</Text>
 				) : (
@@ -1113,12 +1194,16 @@ function FormBody({
 				<FieldTree key={field.path.join('.')} field={field} depth={0} rowProps={rowProps} />
 			))}
 			{invoking && !disconnected && (
-				<Text color="yellow" bold>
-					invoking…
-				</Text>
+				<Box flexDirection="row">
+					<Spinner env={env} />
+					<Text color={yellowColor} bold>
+						{' '}
+						invoking…
+					</Text>
+				</Box>
 			)}
 			{disconnected && (
-				<Text color="red" bold>
+				<Text color={redColor} bold>
 					server disconnected — cannot invoke
 				</Text>
 			)}
@@ -1411,10 +1496,12 @@ function StatusBar({
 	focusedPane,
 	connState,
 	rightMode,
+	env,
 }: {
 	focusedPane: Pane;
 	connState: ConnectionState;
 	rightMode: RightMode;
+	env: UiEnv;
 }): React.ReactElement {
 	let hints: string;
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
@@ -1439,7 +1526,7 @@ function StatusBar({
 	return (
 		<Box flexDirection="row" justifyContent="space-between" paddingX={1}>
 			<Text dimColor>{hints}</Text>
-			<Text color={blip.color} bold>
+			<Text color={semanticColor(env, blip.color)} bold>
 				{blip.text}
 			</Text>
 		</Box>
