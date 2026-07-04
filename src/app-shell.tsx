@@ -90,17 +90,75 @@ function schemaFields(schema: JSONSchema): SchemaField[] {
 	return fields;
 }
 
-function initialStateFromSpec(spec: FormSpec): FormState {
-	const state: FormState = {};
-	for (const field of spec.fields) {
+type FocusRow =
+	| { kind: 'primitive'; field: FormField }
+	| { kind: 'raw-json'; field: FormField }
+	| { kind: 'array-item'; field: FormField; index: number }
+	| { kind: 'array-add'; field: FormField };
+
+function seedInitialState(fields: FormField[], state: FormState): void {
+	for (const field of fields) {
 		const key = field.path.join('.');
+		const kind = field.fieldKind;
+		if (kind.kind === 'object') {
+			seedInitialState(kind.fields, state);
+			continue;
+		}
+		if (kind.kind === 'array-of-primitives') {
+			state[key] = [''];
+			continue;
+		}
+		if (kind.kind === 'raw-json') {
+			state[key] = '';
+			continue;
+		}
 		if (field.default !== undefined) {
 			state[key] = String(field.default);
 		} else {
 			state[key] = '';
 		}
 	}
+}
+
+function initialStateFromSpec(spec: FormSpec): FormState {
+	const state: FormState = {};
+	seedInitialState(spec.fields, state);
 	return state;
+}
+
+function collectFocusRows(field: FormField, state: FormState, rows: FocusRow[]): void {
+	const kind = field.fieldKind;
+	if (kind.kind === 'object') {
+		for (const child of kind.fields) collectFocusRows(child, state, rows);
+		return;
+	}
+	if (kind.kind === 'array-of-primitives') {
+		const key = field.path.join('.');
+		const raw = state[key];
+		const arr = Array.isArray(raw) ? (raw as unknown[]) : [];
+		for (let i = 0; i < arr.length; i++) {
+			rows.push({ kind: 'array-item', field, index: i });
+		}
+		rows.push({ kind: 'array-add', field });
+		return;
+	}
+	if (kind.kind === 'raw-json') {
+		rows.push({ kind: 'raw-json', field });
+		return;
+	}
+	rows.push({ kind: 'primitive', field });
+}
+
+function focusRowsForSpec(spec: FormSpec, state: FormState): FocusRow[] {
+	const rows: FocusRow[] = [];
+	for (const field of spec.fields) collectFocusRows(field, state, rows);
+	return rows;
+}
+
+function readArray(state: FormState, key: string): string[] {
+	const raw = state[key];
+	if (!Array.isArray(raw)) return [];
+	return raw.map((v) => (typeof v === 'string' ? v : ''));
 }
 
 // form-engine is lazy-loaded (ADR 2) — schemaToForm/submit both live behind
@@ -279,11 +337,16 @@ export function App({ path }: AppProps): React.ReactElement {
 		const { submit } = await loadFormEngine();
 		const result = await submit(ctx.schema, ctx.state);
 		if (!result.valid) {
+			const rows = focusRowsForSpec(ctx.spec, ctx.state);
 			const firstInvalid = Math.max(
 				0,
-				ctx.spec.fields.findIndex((f) =>
-					result.errors.some((e) => e.path.join('.') === f.path.join('.')),
-				),
+				rows.findIndex((row) => {
+					const key = row.field.path.join('.');
+					return result.errors.some((e) => {
+						const errKey = e.path.join('.');
+						return errKey === key || errKey.startsWith(`${key}.`);
+					});
+				}),
 			);
 			setRightMode({
 				kind: 'form',
@@ -326,28 +389,78 @@ export function App({ path }: AppProps): React.ReactElement {
 				setFocusedPane('middle');
 				return;
 			}
-			if (key.return) {
-				void submitForm(ctx);
+			const rows = focusRowsForSpec(ctx.spec, ctx.state);
+			if (rows.length === 0) {
+				if (key.return) void submitForm(ctx);
 				return;
 			}
+			const focusedRow = rows[Math.min(ctx.focusedFieldIndex, rows.length - 1)];
+			if (!focusedRow) return;
+
 			if (key.tab) {
-				const total = ctx.spec.fields.length;
-				if (total <= 1) return;
+				if (rows.length <= 1) return;
 				const delta = key.shift ? -1 : 1;
-				const next = (ctx.focusedFieldIndex + delta + total) % total;
+				const next = (ctx.focusedFieldIndex + delta + rows.length) % rows.length;
 				setRightMode({ kind: 'form', ctx: { ...ctx, focusedFieldIndex: next } });
 				return;
 			}
-			// Field editing: text/number/boolean/enum → single-line string input.
-			const focused = ctx.spec.fields[ctx.focusedFieldIndex];
-			if (!focused) return;
-			const key_ = focused.path.join('.');
-			const cur = typeof ctx.state[key_] === 'string' ? (ctx.state[key_] as string) : '';
+
+			// Enter on the "add row" affordance appends a new empty row and moves
+			// focus to it. Enter elsewhere submits.
+			if (key.return) {
+				if (focusedRow.kind === 'array-add') {
+					const arrKey = focusedRow.field.path.join('.');
+					const arr = readArray(ctx.state, arrKey);
+					const next = [...arr, ''];
+					const nextState: FormState = { ...ctx.state, [arrKey]: next };
+					// Focus moves to the newly appended item (same position as the old
+					// "add" row).
+					setRightMode({
+						kind: 'form',
+						ctx: { ...ctx, state: nextState, focusedFieldIndex: ctx.focusedFieldIndex },
+					});
+					return;
+				}
+				void submitForm(ctx);
+				return;
+			}
+
+			// Field editing.
+			const stateKey = focusedRow.field.path.join('.');
+			if (focusedRow.kind === 'array-item') {
+				const arr = readArray(ctx.state, stateKey);
+				const cur = arr[focusedRow.index] ?? '';
+				if (key.backspace || key.delete) {
+					const nextArr = [...arr];
+					nextArr[focusedRow.index] = cur.slice(0, -1);
+					setRightMode({
+						kind: 'form',
+						ctx: { ...ctx, state: { ...ctx.state, [stateKey]: nextArr } },
+					});
+					return;
+				}
+				if (input && !key.meta && !key.ctrl) {
+					const nextArr = [...arr];
+					nextArr[focusedRow.index] = cur + input;
+					setRightMode({
+						kind: 'form',
+						ctx: { ...ctx, state: { ...ctx.state, [stateKey]: nextArr } },
+					});
+					return;
+				}
+				return;
+			}
+
+			// array-add row without Enter — ignore other input.
+			if (focusedRow.kind === 'array-add') return;
+
+			// primitive / raw-json rows edit a plain string.
+			const cur = typeof ctx.state[stateKey] === 'string' ? (ctx.state[stateKey] as string) : '';
 			if (key.backspace || key.delete) {
 				const next = cur.slice(0, -1);
 				setRightMode({
 					kind: 'form',
-					ctx: { ...ctx, state: { ...ctx.state, [key_]: next } },
+					ctx: { ...ctx, state: { ...ctx.state, [stateKey]: next } },
 				});
 				return;
 			}
@@ -358,7 +471,7 @@ export function App({ path }: AppProps): React.ReactElement {
 				const next = cur + input;
 				setRightMode({
 					kind: 'form',
-					ctx: { ...ctx, state: { ...ctx.state, [key_]: next } },
+					ctx: { ...ctx, state: { ...ctx.state, [stateKey]: next } },
 				});
 				return;
 			}
@@ -698,12 +811,8 @@ function PreviewBody({
 	return <>{visible}</>;
 }
 
-function fieldKindHint(kind: FormFieldKind): string {
-	// raw-json comes first so its `reason` is accessible without further narrowing.
-	if (kind.kind === 'raw-json') return `raw JSON (${kind.reason})`;
+function primitiveHint(kind: FormFieldKind): string {
 	if (kind.kind === 'enum') return `enum: ${kind.options.join(' | ')}`;
-	if (kind.kind === 'object') return 'object';
-	if (kind.kind === 'array-of-primitives') return `array<${kind.itemKind}>`;
 	if (kind.kind === 'boolean') return 'boolean (true / false)';
 	return kind.kind; // string | number
 }
@@ -721,22 +830,29 @@ function FormBody({ ctx, invoking }: { ctx: FormCtx; invoking: boolean }): React
 	const errorByPath = new Map<string, string>();
 	for (const e of ctx.errors) errorByPath.set(e.path.join('.'), e.message);
 
+	const rows = focusRowsForSpec(ctx.spec, ctx.state);
+	const focusedRowIndex = Math.min(ctx.focusedFieldIndex, rows.length - 1);
+	// Build a set of (field-path, focus-index) so nested renderers can look up
+	// focus state without threading indices through every recursion level.
+	const focusIndexByRowKey = new Map<string, number>();
+	for (let idx = 0; idx < rows.length; idx++) {
+		const row = rows[idx];
+		if (row) focusIndexByRowKey.set(rowKey(row), idx);
+	}
+
+	const rowProps: RowProps = {
+		state: ctx.state,
+		errorByPath,
+		focusedIndex: focusedRowIndex,
+		focusIndexByRowKey,
+		invoking,
+	};
+
 	return (
 		<Box flexDirection="column">
 			<Text bold>{ctx.tool.name}</Text>
-			{ctx.spec.fields.map((field, idx) => (
-				<FieldRow
-					key={field.path.join('.')}
-					field={field}
-					value={
-						typeof ctx.state[field.path.join('.')] === 'string'
-							? (ctx.state[field.path.join('.')] as string)
-							: ''
-					}
-					focused={idx === ctx.focusedFieldIndex && !invoking}
-					errorMessage={errorByPath.get(field.path.join('.'))}
-					disabled={invoking}
-				/>
+			{ctx.spec.fields.map((field) => (
+				<FieldTree key={field.path.join('.')} field={field} depth={0} rowProps={rowProps} />
 			))}
 			{invoking && (
 				<Text color="yellow" bold>
@@ -747,21 +863,157 @@ function FormBody({ ctx, invoking }: { ctx: FormCtx; invoking: boolean }): React
 	);
 }
 
-function FieldRow({
+function rowKey(row: FocusRow): string {
+	if (row.kind === 'array-item') return `array-item:${row.field.path.join('.')}:${row.index}`;
+	if (row.kind === 'array-add') return `array-add:${row.field.path.join('.')}`;
+	if (row.kind === 'raw-json') return `raw-json:${row.field.path.join('.')}`;
+	return `primitive:${row.field.path.join('.')}`;
+}
+
+type RowProps = {
+	state: FormState;
+	errorByPath: Map<string, string>;
+	focusedIndex: number;
+	focusIndexByRowKey: Map<string, number>;
+	invoking: boolean;
+};
+
+function indent(depth: number): string {
+	return '  '.repeat(depth);
+}
+
+function FieldTree({
+	field,
+	depth,
+	rowProps,
+}: {
+	field: FormField;
+	depth: number;
+	rowProps: RowProps;
+}): React.ReactElement {
+	const kind = field.fieldKind;
+	const requiredMark = field.required ? '*' : '';
+	const stateKey = field.path.join('.');
+	const errorMessage = rowProps.errorByPath.get(stateKey);
+
+	if (kind.kind === 'object') {
+		return (
+			<Box flexDirection="column">
+				<Text>
+					{indent(depth)}
+					<Text bold>
+						{field.label}
+						{requiredMark}
+					</Text>
+					<Text dimColor> (object)</Text>
+				</Text>
+				{kind.fields.map((child) => (
+					<FieldTree
+						key={child.path.join('.')}
+						field={child}
+						depth={depth + 1}
+						rowProps={rowProps}
+					/>
+				))}
+			</Box>
+		);
+	}
+
+	if (kind.kind === 'array-of-primitives') {
+		const items = readArray(rowProps.state, stateKey);
+		return (
+			<Box flexDirection="column">
+				<Text>
+					{indent(depth)}
+					<Text bold>
+						{field.label}
+						{requiredMark}
+					</Text>
+					<Text dimColor> (array&lt;{kind.itemKind}&gt;)</Text>
+				</Text>
+				{items.map((value, i) => {
+					const key = `array-item:${stateKey}:${i}`;
+					const rowIdx = rowProps.focusIndexByRowKey.get(key) ?? -1;
+					const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
+					return (
+						<ArrayItemRow
+							key={key}
+							depth={depth + 1}
+							index={i}
+							value={value}
+							focused={focused}
+							disabled={rowProps.invoking}
+						/>
+					);
+				})}
+				<AddRowAffordance
+					depth={depth + 1}
+					focused={
+						(rowProps.focusIndexByRowKey.get(`array-add:${stateKey}`) ?? -1) ===
+							rowProps.focusedIndex && !rowProps.invoking
+					}
+				/>
+				{errorMessage !== undefined && (
+					<Text color="red">
+						{indent(depth + 1)}error: {errorMessage}
+					</Text>
+				)}
+			</Box>
+		);
+	}
+
+	if (kind.kind === 'raw-json') {
+		const value =
+			typeof rowProps.state[stateKey] === 'string' ? (rowProps.state[stateKey] as string) : '';
+		const rowIdx = rowProps.focusIndexByRowKey.get(`raw-json:${stateKey}`) ?? -1;
+		const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
+		return (
+			<RawJsonRow
+				field={field}
+				reason={kind.reason}
+				value={value}
+				depth={depth}
+				focused={focused}
+				disabled={rowProps.invoking}
+				errorMessage={errorMessage}
+			/>
+		);
+	}
+
+	// Primitive (string / number / boolean / enum).
+	const value =
+		typeof rowProps.state[stateKey] === 'string' ? (rowProps.state[stateKey] as string) : '';
+	const rowIdx = rowProps.focusIndexByRowKey.get(`primitive:${stateKey}`) ?? -1;
+	const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
+	return (
+		<PrimitiveRow
+			field={field}
+			value={value}
+			depth={depth}
+			focused={focused}
+			disabled={rowProps.invoking}
+			errorMessage={errorMessage}
+		/>
+	);
+}
+
+function PrimitiveRow({
 	field,
 	value,
+	depth,
 	focused,
-	errorMessage,
 	disabled,
+	errorMessage,
 }: {
 	field: FormField;
 	value: string;
+	depth: number;
 	focused: boolean;
-	errorMessage?: string;
 	disabled: boolean;
+	errorMessage?: string;
 }): React.ReactElement {
 	const requiredMark = field.required ? '*' : '';
-	const hint = fieldKindHint(field.fieldKind);
+	const hint = primitiveHint(field.fieldKind);
 	const hasError = errorMessage !== undefined;
 	const labelColor = hasError ? 'red' : undefined;
 	const inputColor = hasError ? 'red' : undefined;
@@ -770,6 +1022,7 @@ function FieldRow({
 	return (
 		<Box flexDirection="column">
 			<Box flexDirection="row">
+				<Text>{indent(depth)}</Text>
 				<Text color={labelColor} inverse={focused} bold={focused}>
 					{field.label}
 					{requiredMark}
@@ -782,15 +1035,111 @@ function FieldRow({
 			</Box>
 			{hasError && (
 				<Text color="red">
-					{'  '}error: {errorMessage}
+					{indent(depth + 1)}error: {errorMessage}
 				</Text>
 			)}
 			{field.description && !hasError && (
 				<Text dimColor>
-					{'  '}
+					{indent(depth + 1)}
 					{field.description}
 				</Text>
 			)}
+		</Box>
+	);
+}
+
+function RawJsonRow({
+	field,
+	reason,
+	value,
+	depth,
+	focused,
+	disabled,
+	errorMessage,
+}: {
+	field: FormField;
+	reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary';
+	value: string;
+	depth: number;
+	focused: boolean;
+	disabled: boolean;
+	errorMessage?: string;
+}): React.ReactElement {
+	const requiredMark = field.required ? '*' : '';
+	const hasError = errorMessage !== undefined;
+	const labelColor = hasError ? 'red' : undefined;
+	const inputColor = hasError ? 'red' : undefined;
+	const cursor = focused && !disabled ? '▎' : '';
+	const displayValue = value.length === 0 && !focused ? ' ' : value;
+	return (
+		<Box flexDirection="column">
+			<Box flexDirection="row">
+				<Text>{indent(depth)}</Text>
+				<Text color={labelColor} inverse={focused} bold={focused}>
+					{field.label}
+					{requiredMark}
+				</Text>
+				<Text dimColor> (raw JSON — {reason})</Text>
+			</Box>
+			<Box flexDirection="row">
+				<Text>{indent(depth + 1)}</Text>
+				<Text color={inputColor} dimColor={disabled}>
+					{displayValue}
+					{cursor}
+				</Text>
+			</Box>
+			{hasError && (
+				<Text color="red">
+					{indent(depth + 1)}error: {errorMessage}
+				</Text>
+			)}
+		</Box>
+	);
+}
+
+function ArrayItemRow({
+	depth,
+	index,
+	value,
+	focused,
+	disabled,
+}: {
+	depth: number;
+	index: number;
+	value: string;
+	focused: boolean;
+	disabled: boolean;
+}): React.ReactElement {
+	const cursor = focused && !disabled ? '▎' : '';
+	const displayValue = value.length === 0 && !focused ? ' ' : value;
+	return (
+		<Box flexDirection="row">
+			<Text>{indent(depth)}</Text>
+			<Text inverse={focused} bold={focused}>
+				[{index}]
+			</Text>
+			<Text>: </Text>
+			<Text dimColor={disabled}>
+				{displayValue}
+				{cursor}
+			</Text>
+		</Box>
+	);
+}
+
+function AddRowAffordance({
+	depth,
+	focused,
+}: {
+	depth: number;
+	focused: boolean;
+}): React.ReactElement {
+	return (
+		<Box flexDirection="row">
+			<Text>{indent(depth)}</Text>
+			<Text dimColor inverse={focused} bold={focused}>
+				[+ add row — enter to append]
+			</Text>
 		</Box>
 	);
 }

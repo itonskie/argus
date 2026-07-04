@@ -104,42 +104,6 @@ describe('form-engine.schemaToForm — primitives', () => {
 		expect(spec.fields.find((f) => f.label === 'a')?.required).toBe(true);
 		expect(spec.fields.find((f) => f.label === 'b')?.required).toBe(false);
 	});
-
-	it('throws a clear "not implemented in Slice 6" error for nested-object shapes', () => {
-		const schema: JSONSchema = {
-			type: 'object',
-			properties: {
-				user: {
-					type: 'object',
-					properties: { name: { type: 'string' } },
-				},
-			},
-		};
-
-		expect(() => schemaToForm(schema)).toThrow(/not implemented in Slice 6/);
-	});
-
-	it('throws for array-of-primitives at this slice (deferred to Slice 8)', () => {
-		const schema: JSONSchema = {
-			type: 'object',
-			properties: {
-				tags: { type: 'array', items: { type: 'string' } },
-			},
-		};
-
-		expect(() => schemaToForm(schema)).toThrow(/not implemented in Slice 6/);
-	});
-
-	it('throws for oneOf raw-json fallback at this slice (deferred to Slice 8)', () => {
-		const schema: JSONSchema = {
-			type: 'object',
-			properties: {
-				either: { oneOf: [{ type: 'string' }, { type: 'number' }] },
-			},
-		};
-
-		expect(() => schemaToForm(schema)).toThrow(/not implemented in Slice 6/);
-	});
 });
 
 describe('form-engine.submit — primitives', () => {
