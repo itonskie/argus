@@ -60,6 +60,26 @@ The `form-engine` module (`src/form-engine.ts`) converts a JSON Schema into a `F
 
 Non-primitive shapes throw a `not implemented in Slice 6` error: nested `object`, `array`, `oneOf` / `anyOf`, `$ref`, and binary strings. Slice 8 (issue #9) completes the graceful ladder by rendering nested objects, arrays of primitives, and raw-JSON textareas per [ADR 5](./docs/adrs/5-graceful-ladder-form-fallback.md). The public interface (`schemaToForm`, `submit`) stays stable across the upgrade.
 
+### Terminal-size + accessibility modes
+
+argus supports three environment overrides for a11y and terminal compat (design-spec §1, §2.3, §6):
+
+```bash
+# Force ASCII borders + spinner (| / - \) — no Unicode required.
+ARGUS_ASCII=1 argus <path>
+
+# Drop all color; focus indicator falls back to a bold Unicode border.
+NO_COLOR=1 argus <path>
+
+# Static "…" spinner instead of the braille dot rotation.
+PREFERS_REDUCED_MOTION=1 argus <path>
+```
+
+Below 80×24 argus swaps the three-pane layout for a single-line
+`argus requires 80×24 terminal — current: NxN` message. Resize the terminal
+back up and the layout returns automatically — focus and selection are
+preserved across the resize.
+
 ### Startup budget
 
 argus targets **< 200ms** cold-start-to-first-paint. `@modelcontextprotocol/sdk` and `ajv` must be loaded via dynamic `import()` inside the modules that use them, never at file top-level. See [ADR 2](./docs/adrs/2-lazy-load-heavyweight-deps.md).
