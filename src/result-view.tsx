@@ -2,7 +2,10 @@ import { Box, Text } from 'ink';
 import type React from 'react';
 import type { InvokeResult, McpError } from './mcp-client.js';
 
-const LARGE_RESPONSE_HINT_THRESHOLD_KB = 20; // Slice 9 wires up the `o → $PAGER` handoff.
+const LARGE_RESPONSE_HINT_THRESHOLD_KB = 20;
+// Above the threshold, only the first N pretty-print lines render inline. The
+// full payload is still available via `o → $PAGER` (design-spec §3.5).
+const LARGE_RESPONSE_INLINE_LINE_LIMIT = 200;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -157,6 +160,23 @@ function renderJson(value: unknown, indent = 0): React.ReactNode[] {
 	return out;
 }
 
+// Returns the payload to hand to `$PAGER` when the user presses `o`. Mirrors
+// the on-screen classification (design-spec §3.5): text results pipe as raw
+// text, base64 as a metadata line, everything else as pretty JSON. Returns
+// null for errors and empty responses — nothing worth paging.
+export function serializeResultForPager(result: InvokeResult): string | null {
+	if (!result.ok) return null;
+	const payload = result.result;
+	if (isEmpty(payload)) return null;
+	const classified = classifyMcpResult(payload);
+	if (classified.kind === 'text') return classified.text;
+	if (classified.kind === 'base64') {
+		const mime = classified.mimeType ?? 'application/octet-stream';
+		return `${mime} — ${classified.sizeBytes} bytes (base64)`;
+	}
+	return JSON.stringify(classified.value, null, 2);
+}
+
 function errorBlock(error: McpError): React.ReactNode {
 	if (error.kind === 'timeout') {
 		return (
@@ -214,7 +234,7 @@ export function ResultView({
 		if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
 			lines.unshift(
 				<Text key="warn" color="yellow" bold>
-					warning: response is {kb} KB — press o to open in $PAGER (Slice 9)
+					warning: response is {kb} KB — press o to open in $PAGER
 				</Text>,
 			);
 		}
@@ -238,10 +258,12 @@ export function ResultView({
 	if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
 		lines.push(
 			<Text key="warn" color="yellow" bold>
-				warning: response is {kb} KB — press o to open in $PAGER (Slice 9)
+				warning: response is {kb} KB — press o to open in $PAGER
 			</Text>,
 		);
+		lines.push(...jsonLines.slice(0, LARGE_RESPONSE_INLINE_LINE_LIMIT));
+	} else {
+		lines.push(...jsonLines);
 	}
-	lines.push(...jsonLines);
 	return <Box flexDirection="column">{scrollLines(lines, scroll)}</Box>;
 }

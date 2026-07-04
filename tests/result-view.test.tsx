@@ -86,4 +86,28 @@ describe('ResultView', () => {
 		expect(frame.toLowerCase()).toContain('warning');
 		expect(frame).toContain('KB');
 	});
+
+	it('banner uses production text (no "Slice 9" placeholder) and mentions `press o` + $PAGER', () => {
+		const big: Record<string, string> = {};
+		for (let i = 0; i < 300; i++) big[`key_${i}`] = 'x'.repeat(100);
+		const frame = frameOf({ ok: true, result: { content: [], structuredContent: big } });
+		expect(frame).not.toContain('Slice 9');
+		expect(frame).toMatch(/press o to open in \$PAGER/);
+	});
+
+	it('truncates the pretty-printed JSON to 200 lines when the response is >= 20 KB', () => {
+		// One entry per key gives ~one key-line per top-level key in the pretty-print.
+		// 400 keys with a fat value pushes serialized size comfortably past 20 KB
+		// AND produces > 200 pretty-print lines (open brace + 400 kv lines + close).
+		const big: Record<string, string> = {};
+		for (let i = 0; i < 400; i++) big[`key_${i.toString().padStart(4, '0')}`] = 'x'.repeat(60);
+		const frame = frameOf({ ok: true, result: { content: [], structuredContent: big } });
+		// Every one of the last 100 keys must be truncated away.
+		for (let i = 300; i < 400; i++) {
+			const key = `key_${i.toString().padStart(4, '0')}`;
+			expect(frame).not.toContain(key);
+		}
+		// And a top-slice key survives (so we know we haven't hidden everything).
+		expect(frame).toContain('key_0000');
+	});
 });
