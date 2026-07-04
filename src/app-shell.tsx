@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useStdin } from 'ink';
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import type { FormField, FormFieldKind, FormSpec, FormState, SubmitResult } from './form-engine.js';
@@ -12,7 +12,8 @@ import {
 	type McpClient,
 	type McpError,
 } from './mcp-client.js';
-import { ResultView } from './result-view.js';
+import { spawnPager } from './pager.js';
+import { ResultView, serializeResultForPager } from './result-view.js';
 
 type ConnectionState =
 	| { kind: 'connecting' }
@@ -173,6 +174,7 @@ async function loadFormEngine(): Promise<{
 
 export function App({ path }: AppProps): React.ReactElement {
 	const { exit } = useApp();
+	const { stdin, setRawMode, isRawModeSupported } = useStdin();
 	const clientRef = useRef<McpClient | null>(null);
 	const shuttingDownRef = useRef(false);
 	const [connState, setConnState] = useState<ConnectionState>({ kind: 'connecting' });
@@ -490,6 +492,28 @@ export function App({ path }: AppProps): React.ReactElement {
 			}
 			if (input === 'k') {
 				setResultScroll((n) => Math.max(n - 1, 0));
+				return;
+			}
+			if (input === 'o') {
+				const payload = serializeResultForPager(rightMode.result);
+				if (payload !== null) {
+					// Suspend Ink's stdin handling so the pager owns the terminal:
+					// drop raw mode + pause our stream, so keystrokes route to less
+					// (via /dev/tty) rather than back into useInput. On pager exit,
+					// restore raw mode + resume — Ink re-renders the same result frame
+					// because state didn't change.
+					if (isRawModeSupported) setRawMode(false);
+					stdin.pause();
+					spawnPager(payload)
+						.catch(() => {
+							// Missing binary / spawn failure — silent; user can `esc`
+							// back and retry after fixing $PAGER.
+						})
+						.finally(() => {
+							stdin.resume();
+							if (isRawModeSupported) setRawMode(true);
+						});
+				}
 				return;
 			}
 			if (input === 'h') {
@@ -1157,7 +1181,7 @@ function StatusBar({
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
 		hints = 'tab/shift-tab fields  enter submit  esc cancel  q quit';
 	} else if (rightMode.kind === 'result') {
-		hints = 'j/k scroll  esc back to form  h back  q quit';
+		hints = 'j/k scroll  o open in $PAGER  esc back to form  h back  q quit';
 	} else if (focusedPane === 'left') {
 		hints = 'q quit';
 	} else if (focusedPane === 'middle') {
