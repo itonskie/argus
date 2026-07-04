@@ -30,6 +30,7 @@ type TabState = {
 	items: Capability[];
 	status: ListStatus;
 	selectedIndex: number;
+	errorMessage?: string;
 };
 
 type RightMode =
@@ -65,6 +66,20 @@ function normalizeThrown(err: unknown): McpError {
 	}
 	const message = err instanceof Error ? err.message : String(err);
 	return { kind: 'server-error', code: -32000, message };
+}
+
+function mcpErrorMessage(err: unknown): string {
+	const norm = normalizeThrown(err);
+	if (norm.kind === 'server-error') return norm.message;
+	if (norm.kind === 'timeout') return 'timed out';
+	return 'server disconnected';
+}
+
+function formatExitDetail(err: McpError): string {
+	if (err.kind !== 'disconnected') return '';
+	if (typeof err.exitCode === 'number') return `code ${err.exitCode}`;
+	if (typeof err.signal === 'string' && err.signal.length > 0) return `signal ${err.signal}`;
+	return 'code unknown';
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -286,7 +301,11 @@ export function App({ path }: AppProps): React.ReactElement {
 				if (toolsRes.status === 'fulfilled') {
 					setTools({ items: toolsRes.value, status: 'loaded', selectedIndex: 0 });
 				} else {
-					setTools((s) => ({ ...s, status: 'error' }));
+					setTools((s) => ({
+						...s,
+						status: 'error',
+						errorMessage: mcpErrorMessage(toolsRes.reason),
+					}));
 				}
 				if (resourcesRes.status === 'fulfilled') {
 					setResources({
@@ -295,7 +314,11 @@ export function App({ path }: AppProps): React.ReactElement {
 						selectedIndex: 0,
 					});
 				} else {
-					setResources((s) => ({ ...s, status: 'error' }));
+					setResources((s) => ({
+						...s,
+						status: 'error',
+						errorMessage: mcpErrorMessage(resourcesRes.reason),
+					}));
 				}
 				if (promptsRes.status === 'fulfilled') {
 					setPrompts({
@@ -304,7 +327,11 @@ export function App({ path }: AppProps): React.ReactElement {
 						selectedIndex: 0,
 					});
 				} else {
-					setPrompts((s) => ({ ...s, status: 'error' }));
+					setPrompts((s) => ({
+						...s,
+						status: 'error',
+						errorMessage: mcpErrorMessage(promptsRes.reason),
+					}));
 				}
 			} catch (err) {
 				if (cancelled) return;
@@ -345,6 +372,29 @@ export function App({ path }: AppProps): React.ReactElement {
 		if (activeTab === 'tools') setTools(updater);
 		else if (activeTab === 'resources') setResources(updater);
 		else setPrompts(updater);
+	};
+
+	const retryList = async (tab: Tab): Promise<void> => {
+		const client = clientRef.current;
+		if (!client) return;
+		if (connState.kind === 'error') return; // no point retrying against a dead server
+		const setter = tab === 'tools' ? setTools : tab === 'resources' ? setResources : setPrompts;
+		setter((s) => ({ ...s, status: 'loading', errorMessage: undefined }));
+		try {
+			const items =
+				tab === 'tools'
+					? await client.listTools()
+					: tab === 'resources'
+						? await client.listResources()
+						: await client.listPrompts();
+			setter({ items, status: 'loaded', selectedIndex: 0 });
+		} catch (err) {
+			setter((s) => ({
+				...s,
+				status: 'error',
+				errorMessage: mcpErrorMessage(err),
+			}));
+		}
 	};
 
 	const enterFormMode = async (item: Capability, tab: Tab): Promise<void> => {
@@ -433,10 +483,20 @@ export function App({ path }: AppProps): React.ReactElement {
 		setResultScroll(0);
 	};
 
+	const serverDisconnected = connState.kind === 'error' && connState.error.kind === 'disconnected';
+	const initializeErrored = connState.kind === 'error' && connState.error.kind !== 'disconnected';
+
 	useInput((input, key) => {
 		// Ctrl-C always quits.
 		if (key.ctrl && input === 'c') {
 			quit();
+			return;
+		}
+
+		// Initialize timeout (or other pre-connect error) — design-spec §4.3:
+		// only `q` and Ctrl-C work; middle/right panes are disabled/hidden.
+		if (initializeErrored) {
+			if (input === 'q') quit();
 			return;
 		}
 
@@ -445,6 +505,15 @@ export function App({ path }: AppProps): React.ReactElement {
 			const ctx = rightMode.ctx;
 			if (rightMode.kind === 'invoking') {
 				// Fields are locked while the invocation is in flight.
+				return;
+			}
+			if (serverDisconnected) {
+				// design-spec §3.4: form disabled when server crashed. esc still
+				// lets the user retreat to Preview so they can `q` to quit.
+				if (key.escape) {
+					setRightMode({ kind: 'preview' });
+					setFocusedPane('middle');
+				}
 				return;
 			}
 			if (key.escape) {
@@ -619,6 +688,14 @@ export function App({ path }: AppProps): React.ReactElement {
 			return;
 		}
 
+		// `r to retry` (design-spec §3.2): if the currently visible tab failed to
+		// list, `r` re-issues that list call instead of switching to the resources
+		// tab. Only rebinds when the active tab is actually in error.
+		if (input === 'r' && activeTabState.status === 'error' && !serverDisconnected) {
+			void retryList(activeTab);
+			return;
+		}
+
 		if (
 			(focusedPane === 'middle' || focusedPane === 'right') &&
 			(input === 't' || input === 'r' || input === 'p')
@@ -690,6 +767,7 @@ export function App({ path }: AppProps): React.ReactElement {
 					scroll={previewScroll}
 					rightMode={rightMode}
 					resultScroll={resultScroll}
+					connState={connState}
 				/>
 			</Box>
 			<StatusBar focusedPane={focusedPane} connState={connState} rightMode={rightMode} />
@@ -706,6 +784,23 @@ function ConnectionPane({
 	connState: ConnectionState;
 	focused: boolean;
 }): React.ReactElement {
+	if (connState.kind === 'error') {
+		return (
+			<Box
+				borderStyle="single"
+				borderColor={focused ? 'cyan' : 'red'}
+				width={18}
+				flexDirection="column"
+				paddingX={1}
+			>
+				<Text bold={focused} underline={focused} color="red">
+					Connection
+				</Text>
+				<ErrorBlock error={connState.error} />
+				<Text color="red">q to quit</Text>
+			</Box>
+		);
+	}
 	return (
 		<Box
 			borderStyle="single"
@@ -726,12 +821,31 @@ function ConnectionPane({
 				</>
 			)}
 			{connState.kind === 'connecting' && <Text color="yellow">● connecting</Text>}
-			{connState.kind === 'error' && (
-				<Text color="red" bold>
-					● {connState.error.kind}
-				</Text>
-			)}
 		</Box>
+	);
+}
+
+function ErrorBlock({ error }: { error: McpError }): React.ReactElement {
+	// design-spec §3.1 wording, matched verbatim: `error:` prefix pairs with red
+	// text so state is distinguishable without color (design-spec §6).
+	if (error.kind === 'timeout') {
+		return (
+			<Text color="red" bold>
+				error: server did not respond to initialize within 5s
+			</Text>
+		);
+	}
+	if (error.kind === 'disconnected') {
+		return (
+			<Text color="red" bold>
+				error: server exited ({formatExitDetail(error)}) — invocations disabled
+			</Text>
+		);
+	}
+	return (
+		<Text color="red" bold>
+			error: {error.message}
+		</Text>
 	);
 }
 
@@ -763,6 +877,10 @@ function CapabilitiesPane({
 		prompts: 'prompts',
 	};
 	const shouldShowLoading = tabState.status === 'loading' || connState.kind === 'connecting';
+	// design-spec §4.3: pane is disabled/hidden when initialize errored (pre-connect
+	// failure). Mid-session `disconnected` leaves the list visible so the user can
+	// still read what they were browsing.
+	const disabledByInitError = connState.kind === 'error' && connState.error.kind !== 'disconnected';
 
 	return (
 		<Box
@@ -772,33 +890,48 @@ function CapabilitiesPane({
 			flexDirection="column"
 			paddingX={1}
 		>
-			<Text bold={focused} underline={focused}>
+			<Text bold={focused} underline={focused} dimColor={disabledByInitError}>
 				Capabilities
 			</Text>
-			<Box flexDirection="row">
-				<TabLabel label="[t]ools " active={activeTab === 'tools'} />
-				<TabLabel label="[r]es " active={activeTab === 'resources'} />
-				<TabLabel label="[p]rmt" active={activeTab === 'prompts'} />
-			</Box>
-			{shouldShowLoading && <Text dimColor>loading {kindLabel[activeTab]}…</Text>}
-			{!shouldShowLoading && tabState.status === 'error' && (
-				<Text color="red" bold>
-					failed to list {kindLabel[activeTab]}
-				</Text>
+			{!disabledByInitError && (
+				<Box flexDirection="row">
+					<TabLabel label="[t]ools " active={activeTab === 'tools'} />
+					<TabLabel label="[r]es " active={activeTab === 'resources'} />
+					<TabLabel label="[p]rmt" active={activeTab === 'prompts'} />
+				</Box>
 			)}
-			{!shouldShowLoading && tabState.status === 'loaded' && tabState.items.length === 0 && (
-				<Text dimColor italic>
-					no {kindLabel[activeTab]} exposed
-				</Text>
+			{!disabledByInitError && shouldShowLoading && (
+				<Text dimColor>loading {kindLabel[activeTab]}…</Text>
 			)}
-			{tabState.items.map((item, i) => {
-				const isSelected = i === tabState.selectedIndex;
-				return (
-					<Text key={item.name} inverse={isSelected && focused} underline={isSelected && !focused}>
-						{item.name}
+			{!disabledByInitError && !shouldShowLoading && tabState.status === 'error' && (
+				<>
+					<Text color="red" bold>
+						failed to list {kindLabel[activeTab]}: {tabState.errorMessage ?? 'unknown error'}
 					</Text>
-				);
-			})}
+					<Text color="red">r to retry</Text>
+				</>
+			)}
+			{!disabledByInitError &&
+				!shouldShowLoading &&
+				tabState.status === 'loaded' &&
+				tabState.items.length === 0 && (
+					<Text dimColor italic>
+						no {kindLabel[activeTab]} exposed
+					</Text>
+				)}
+			{!disabledByInitError &&
+				tabState.items.map((item, i) => {
+					const isSelected = i === tabState.selectedIndex;
+					return (
+						<Text
+							key={item.name}
+							inverse={isSelected && focused}
+							underline={isSelected && !focused}
+						>
+							{item.name}
+						</Text>
+					);
+				})}
 		</Box>
 	);
 }
@@ -810,6 +943,7 @@ function DetailPane({
 	scroll,
 	rightMode,
 	resultScroll,
+	connState,
 }: {
 	focused: boolean;
 	activeTab: Tab;
@@ -817,7 +951,13 @@ function DetailPane({
 	scroll: number;
 	rightMode: RightMode;
 	resultScroll: number;
+	connState: ConnectionState;
 }): React.ReactElement {
+	// design-spec §4.3: an initialize-time error hides right-pane content — the
+	// user should only see the left-pane red block. Mid-session `disconnected`
+	// keeps the pane visible but the FormBody dims and shows a footer.
+	const initializeErrored = connState.kind === 'error' && connState.error.kind !== 'disconnected';
+	const disconnected = connState.kind === 'error' && connState.error.kind === 'disconnected';
 	const title =
 		rightMode.kind === 'form' || rightMode.kind === 'invoking'
 			? 'Form'
@@ -832,19 +972,23 @@ function DetailPane({
 			flexDirection="column"
 			paddingX={1}
 		>
-			<Text bold={focused} underline={focused}>
+			<Text bold={focused} underline={focused} dimColor={initializeErrored}>
 				{title}
 			</Text>
-			{rightMode.kind === 'preview' && selected === undefined && (
+			{!initializeErrored && rightMode.kind === 'preview' && selected === undefined && (
 				<Text dimColor>select an item to preview</Text>
 			)}
-			{rightMode.kind === 'preview' && selected !== undefined && (
+			{!initializeErrored && rightMode.kind === 'preview' && selected !== undefined && (
 				<PreviewBody activeTab={activeTab} item={selected} scroll={scroll} />
 			)}
-			{(rightMode.kind === 'form' || rightMode.kind === 'invoking') && (
-				<FormBody ctx={rightMode.ctx} invoking={rightMode.kind === 'invoking'} />
+			{!initializeErrored && (rightMode.kind === 'form' || rightMode.kind === 'invoking') && (
+				<FormBody
+					ctx={rightMode.ctx}
+					invoking={rightMode.kind === 'invoking'}
+					disconnected={disconnected}
+				/>
 			)}
-			{rightMode.kind === 'result' && (
+			{!initializeErrored && rightMode.kind === 'result' && (
 				<ResultView result={rightMode.result} scroll={resultScroll} />
 			)}
 		</Box>
@@ -914,13 +1058,30 @@ function primitiveHint(kind: FormFieldKind): string {
 	return kind.kind; // string | number
 }
 
-function FormBody({ ctx, invoking }: { ctx: FormCtx; invoking: boolean }): React.ReactElement {
+function FormBody({
+	ctx,
+	invoking,
+	disconnected,
+}: {
+	ctx: FormCtx;
+	invoking: boolean;
+	disconnected: boolean;
+}): React.ReactElement {
+	// design-spec §3.4: server-crash form-disabled state renders the same as
+	// invoking (fields dim, no cursor) but with the explicit disconnected footer.
+	const locked = invoking || disconnected;
 	if (ctx.spec.fields.length === 0) {
 		return (
 			<>
 				<Text bold>{ctx.tool.name}</Text>
 				<Text dimColor>(no arguments)</Text>
-				<Text dimColor>enter to submit · esc to cancel</Text>
+				{disconnected ? (
+					<Text color="red" bold>
+						server disconnected — cannot invoke
+					</Text>
+				) : (
+					<Text dimColor>enter to submit · esc to cancel</Text>
+				)}
 			</>
 		);
 	}
@@ -942,7 +1103,7 @@ function FormBody({ ctx, invoking }: { ctx: FormCtx; invoking: boolean }): React
 		errorByPath,
 		focusedIndex: focusedRowIndex,
 		focusIndexByRowKey,
-		invoking,
+		invoking: locked,
 	};
 
 	return (
@@ -951,9 +1112,14 @@ function FormBody({ ctx, invoking }: { ctx: FormCtx; invoking: boolean }): React
 			{ctx.spec.fields.map((field) => (
 				<FieldTree key={field.path.join('.')} field={field} depth={0} rowProps={rowProps} />
 			))}
-			{invoking && (
+			{invoking && !disconnected && (
 				<Text color="yellow" bold>
 					invoking…
+				</Text>
+			)}
+			{disconnected && (
+				<Text color="red" bold>
+					server disconnected — cannot invoke
 				</Text>
 			)}
 		</Box>

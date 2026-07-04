@@ -84,7 +84,7 @@ describe('mcp-client lifecycle', () => {
 			await new Promise((r) => setTimeout(r, 25));
 		}
 		expect(events).toHaveLength(1);
-		expect(events[0]).toEqual({ kind: 'disconnected' });
+		expect(events[0]?.kind).toBe('disconnected');
 
 		// Give it another beat and confirm no duplicate fires.
 		await new Promise((r) => setTimeout(r, 100));
