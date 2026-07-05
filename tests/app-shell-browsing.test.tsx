@@ -131,8 +131,9 @@ describe('app-shell — full browsing (resources + prompts + Preview)', () => {
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
 
 		const frame = instance?.lastFrame() ?? '';
-		expect(frame).toContain('t/r/p tabs');
-		expect(frame).toContain('j/k list');
+		// design-spec §3.6: arrows + tab are the discoverable path.
+		expect(frame).toContain('tab tabs');
+		expect(frame).toContain('↑/↓ list');
 		expect(frame).toContain('enter form');
 	});
 });
