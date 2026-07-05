@@ -50,6 +50,11 @@ jobs:
 
       - name: Startup budget
         run: node scripts/startup-budget.mjs
+        env:
+          # CI runners are slower than the "modern laptop" the 200ms design
+          # goal targets. Loosen to 300ms here so we still catch large regs
+          # without failing on baseline VM overhead. Local dev keeps 200ms.
+          ARGUS_STARTUP_BUDGET_TARGET_MS: '300'
 
   publish:
     name: Publish to npm

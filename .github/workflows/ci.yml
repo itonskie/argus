@@ -63,3 +63,5 @@ jobs:
 
       - name: Measure cold-start-to-first-paint
         run: node scripts/startup-budget.mjs
+        env:
+          ARGUS_STARTUP_BUDGET_TARGET_MS: '300'

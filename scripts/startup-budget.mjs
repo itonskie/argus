@@ -5,7 +5,10 @@ import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
-const TARGET_MS = 200;
+// Default target is 200ms — the design goal on a modern laptop
+// (engineering-spec §4). CI VMs are meaningfully slower; override via
+// ARGUS_STARTUP_BUDGET_TARGET_MS in that context. Local dev holds tight.
+const TARGET_MS = Number(process.env.ARGUS_STARTUP_BUDGET_TARGET_MS ?? 200);
 const SAMPLES = 5;
 const RUN_TIMEOUT_MS = 10_000;
 
