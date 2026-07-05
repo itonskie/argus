@@ -1,0 +1,48 @@
+{
+  "name": "@itonskie/argus",
+  "version": "0.1.2",
+  "description": "Keyboard-first TUI for inspecting and exercising MCP servers over stdio.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itonskie/argus.git"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "argus": "dist/argus.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "pnpm build && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "format": "biome check --write",
+    "startup-budget": "pnpm build && node scripts/startup-budget.mjs",
+    "smoke": "pnpm build && node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "ink": "^7.1.0",
+    "ink-testing-library": "^4.0.0",
+    "react": "^19.2.7",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "zod": "^4.4.3"
+  }
+}
