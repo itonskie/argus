@@ -1406,7 +1406,7 @@ function RawJsonRow({
 	errorMessage,
 }: {
 	field: FormField;
-	reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary';
+	reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary' | 'open-object';
 	value: string;
 	depth: number;
 	focused: boolean;
