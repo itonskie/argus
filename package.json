@@ -1,6 +1,6 @@
 {
   "name": "@itonskie/argus",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Keyboard-first TUI for inspecting and exercising MCP servers over stdio.",
   "license": "MIT",
   "repository": {
