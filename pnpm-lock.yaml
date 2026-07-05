@@ -7,19 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      ajv:
-        specifier: ^8.20.0
-        version: 8.20.0
-      ajv-formats:
-        specifier: ^3.0.1
-        version: 3.0.1(ajv@8.20.0)
-      ink:
-        specifier: ^7.1.0
-        version: 7.1.0(@types/react@19.2.17)(react@19.2.7)
-      react:
-        specifier: ^19.2.7
-        version: 19.2.7
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.5.2
@@ -33,9 +20,21 @@ importers:
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: ^3.0.1
+        version: 3.0.1(ajv@8.20.0)
+      ink:
+        specifier: ^7.1.0
+        version: 7.1.0(@types/react@19.2.17)(react@19.2.7)
       ink-testing-library:
         specifier: ^4.0.0
         version: 4.0.0(@types/react@19.2.17)
+      react:
+        specifier: ^19.2.7
+        version: 19.2.7
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.16)(typescript@6.0.3)
