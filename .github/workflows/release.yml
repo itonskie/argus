@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version + Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # tag + push the Version Packages PR
+      pull-requests: write   # open/update the Version Packages PR
+      id-token: write        # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # changesets/action:
+      #   - If pending .changeset/*.md files exist: opens/updates a
+      #     "Version Packages" PR that bumps package.json + writes CHANGELOG.md.
+      #   - When that PR merges (pending changesets consumed): runs the
+      #     `publish` command, which builds + publishes to npm and tags v*.
+      - name: Create Release PR or Publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset version
+          publish: pnpm release
+          commit: "chore: version packages"
+          title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
