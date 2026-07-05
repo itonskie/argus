@@ -175,6 +175,54 @@ describe('form-engine.schemaToForm — graceful ladder', () => {
 			expect(spec.fields[0]?.fieldKind.kind).toBe('object');
 		});
 
+		describe('top-level open-object schemas', () => {
+			it('produces a single raw-JSON field for a fully-open top-level schema', () => {
+				const schema: JSONSchema = { type: 'object', additionalProperties: {} };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				const field = spec.fields[0];
+				// Empty path signals "field is the whole payload" to the assembler.
+				expect(field?.path).toEqual([]);
+				expect(field?.required).toBe(true);
+				expect(field?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('also fires for additionalProperties: true at the top level', () => {
+				const schema: JSONSchema = { type: 'object', additionalProperties: true };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				expect(spec.fields[0]?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('also fires for a bare top-level {type:"object"} with no constraints', () => {
+				const schema: JSONSchema = { type: 'object' };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				expect(spec.fields[0]?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('does NOT fire for a closed empty top-level schema', () => {
+				// {additionalProperties: false, properties: {}} — the tool takes
+				// literally `{}`. Existing behavior: empty form, payload is `{}`.
+				const schema: JSONSchema = {
+					type: 'object',
+					properties: {},
+					additionalProperties: false,
+				};
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toEqual([]);
+			});
+		});
+
 		it('matches the lathe-mcp repro schema — required `data` renders as raw-JSON', () => {
 			// Exact reproduction of the schema in issue #16: a required object
 			// property with `additionalProperties: {}` used to render as a
@@ -391,6 +439,40 @@ describe('form-engine.submit — graceful ladder', () => {
 					template: 'basic',
 				});
 				expect(result.valid).toBe(false);
+			});
+		});
+
+		describe('top-level open-object', () => {
+			const schema: JSONSchema = { type: 'object', additionalProperties: {} };
+
+			it('parses arbitrary JSON as the entire payload (no wrapping key)', async () => {
+				// The synthetic root field's state key is the empty string.
+				const result = await submit(schema, {
+					'': '{"anything":"goes","nested":{"a":1}}',
+				});
+				expect(result).toEqual({
+					valid: true,
+					payload: { anything: 'goes', nested: { a: 1 } },
+				});
+			});
+
+			it('reports a JSON syntax error at the root path', async () => {
+				const result = await submit(schema, { '': '{not-json' });
+				expect(result.valid).toBe(false);
+				if (result.valid) throw new Error('expected invalid');
+				expect(result.errors[0]?.message.toLowerCase()).toMatch(/json|parse|syntax/);
+			});
+
+			it('rejects a non-object JSON payload against the top-level object schema', async () => {
+				const result = await submit(schema, { '': '"just a string"' });
+				expect(result.valid).toBe(false);
+			});
+
+			it('treats an empty textarea as {} for a fully-open top-level schema', async () => {
+				// A completely-open top-level schema accepts `{}` — an empty
+				// textarea should still submit successfully.
+				const result = await submit(schema, { '': '' });
+				expect(result).toEqual({ valid: true, payload: {} });
 			});
 		});
 
