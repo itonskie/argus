@@ -1,6 +1,6 @@
 {
   "name": "@itonskie/argus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keyboard-first TUI for inspecting and exercising MCP servers over stdio.",
   "license": "MIT",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/itonskie/argus.git"
   },
   "type": "module",
-  "packageManager": "pnpm@11.9.0",
+  "packageManager": "pnpm@10.14.0",
   "engines": {
     "node": ">=20"
   },
