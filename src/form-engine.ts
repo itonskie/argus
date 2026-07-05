@@ -142,6 +142,21 @@ export function schemaToForm(schema: JSONSchema): FormSpec {
 			`top-level schema must be an object schema — got type ${JSON.stringify(schema?.type)}`,
 		);
 	}
+	// Top-level open-object: the whole payload is arbitrary JSON. Emit a
+	// single synthetic root field — path=[] is the sentinel `assemblePayload`
+	// uses to return the parsed value directly, unwrapped.
+	if (isOpenObjectSchema(schema)) {
+		return {
+			fields: [
+				{
+					path: [],
+					label: 'value',
+					required: true,
+					fieldKind: { kind: 'raw-json', reason: 'open-object' },
+				},
+			],
+		};
+	}
 	return { fields: fieldsFromObjectSchema(schema, []) };
 }
 
@@ -228,11 +243,14 @@ function assembleFieldValue(
 	return { present: true, value: raw };
 }
 
-function assemblePayload(
-	spec: FormSpec,
-	state: FormState,
-	errors: ParseError[],
-): Record<string, unknown> {
+function assemblePayload(spec: FormSpec, state: FormState, errors: ParseError[]): unknown {
+	// Top-level open-object: a single synthetic field with an empty path
+	// carries the entire payload as parsed JSON. Fully-open schemas accept
+	// `{}`, so an absent (empty-textarea) value falls back to `{}`.
+	if (spec.fields.length === 1 && spec.fields[0]?.path.length === 0) {
+		const { present, value } = assembleFieldValue(spec.fields[0], state, errors);
+		return present ? value : {};
+	}
 	const out: Record<string, unknown> = {};
 	for (const field of spec.fields) {
 		const { present, value } = assembleFieldValue(field, state, errors);
