@@ -15,10 +15,19 @@ import {
 } from './mcp-client.js';
 import { spawnPager } from './pager.js';
 import { ResultView, serializeResultForPager } from './result-view.js';
+import { computeScrollWindow } from './scroll-window.js';
 import { Spinner } from './spinner.js';
 
 const MIN_COLUMNS = 80;
 const MIN_ROWS = 24;
+
+// design-spec §2.5: middle-pane budget at any terminal height is
+// (rows − 1 status bar − 2 border − 1 title − 1 tabs − 2 indicators) list rows.
+// Never let it fall below 1 — the size gate already forbids sub-24-row terminals,
+// but the clamp is cheap insurance.
+function middleViewportHeight(terminalRows: number): number {
+	return Math.max(1, terminalRows - 7);
+}
 
 // design-spec §1: three axes of border style — ARGUS_ASCII takes precedence,
 // then NO_COLOR uses bold-style Unicode to distinguish focus without color,
@@ -300,6 +309,7 @@ export function App({ path, env }: AppProps): React.ReactElement {
 	const [activeTab, setActiveTab] = useState<Tab>('tools');
 	const [focusedPane, setFocusedPane] = useState<Pane>('middle');
 	const [previewScroll, setPreviewScroll] = useState(0);
+	const [middleScroll, setMiddleScroll] = useState(0);
 	const [rightMode, setRightMode] = useState<RightMode>({ kind: 'preview' });
 	const [resultScroll, setResultScroll] = useState(0);
 
@@ -708,6 +718,7 @@ export function App({ path, env }: AppProps): React.ReactElement {
 				if (nextTab !== activeTab) {
 					setActiveTab(nextTab);
 					setPreviewScroll(0);
+					setMiddleScroll(0);
 				}
 				return;
 			}
@@ -736,6 +747,8 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			if (nextTab !== activeTab) {
 				setActiveTab(nextTab);
 				setPreviewScroll(0);
+				// Middle-pane scroll is per-view; a new tab starts at the top.
+				setMiddleScroll(0);
 			}
 			return;
 		}
@@ -746,15 +759,20 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			return;
 		}
 
-		if (input === 'j' && focusedPane === 'middle') {
-			setActiveTabState((s) => ({
-				...s,
-				selectedIndex: s.items.length === 0 ? 0 : Math.min(s.selectedIndex + 1, s.items.length - 1),
-			}));
-			return;
-		}
-		if (input === 'k' && focusedPane === 'middle') {
-			setActiveTabState((s) => ({ ...s, selectedIndex: Math.max(s.selectedIndex - 1, 0) }));
+		if ((input === 'j' || input === 'k') && focusedPane === 'middle') {
+			const items = activeTabState.items;
+			if (items.length === 0) return;
+			const cur = activeTabState.selectedIndex;
+			const next = input === 'j' ? Math.min(cur + 1, items.length - 1) : Math.max(cur - 1, 0);
+			if (next === cur) return;
+			const { scrollTop } = computeScrollWindow({
+				totalRows: items.length,
+				focusedIndex: next,
+				viewportHeight: middleViewportHeight(rows),
+				previousScrollTop: middleScroll,
+			});
+			setActiveTabState((s) => ({ ...s, selectedIndex: next }));
+			if (scrollTop !== middleScroll) setMiddleScroll(scrollTop);
 			return;
 		}
 		if (input === 'j' && focusedPane === 'right') {
@@ -804,6 +822,8 @@ export function App({ path, env }: AppProps): React.ReactElement {
 					focused={focusedPane === 'middle'}
 					connState={connState}
 					env={uiEnv}
+					terminalRows={rows}
+					scrollTop={middleScroll}
 				/>
 				<DetailPane
 					focused={focusedPane === 'right'}
@@ -934,12 +954,16 @@ function CapabilitiesPane({
 	focused,
 	connState,
 	env,
+	terminalRows,
+	scrollTop,
 }: {
 	activeTab: Tab;
 	tabState: TabState;
 	focused: boolean;
 	connState: ConnectionState;
 	env: UiEnv;
+	terminalRows: number;
+	scrollTop: number;
 }): React.ReactElement {
 	const kindLabel: Record<Tab, string> = {
 		tools: 'tools',
@@ -953,13 +977,28 @@ function CapabilitiesPane({
 	const disabledByInitError = connState.kind === 'error' && connState.error.kind !== 'disconnected';
 	const redColor = semanticColor(env, 'red');
 
+	// design-spec §2.5 / §2.6: fixed frame, scroll indicator rows always reserved.
+	// Width 22 with paddingX=0 lets `[t]ools [r]es [p]rmt` fit exactly inside the border.
+	const viewportHeight = middleViewportHeight(terminalRows);
+	const scrollWin = computeScrollWindow({
+		totalRows: tabState.items.length,
+		focusedIndex: tabState.selectedIndex,
+		viewportHeight,
+		previousScrollTop: scrollTop,
+	});
+	const showList =
+		!disabledByInitError &&
+		!shouldShowLoading &&
+		tabState.status === 'loaded' &&
+		tabState.items.length > 0;
+
 	return (
 		<Box
 			borderStyle={borderStyleFor(env, focused)}
 			borderColor={focusBorderColor(env, focused)}
-			width={24}
+			width={22}
+			height={Math.max(3, terminalRows - 1)}
 			flexDirection="column"
-			paddingX={1}
 		>
 			<Text bold={focused} underline={focused} dimColor={disabledByInitError}>
 				Capabilities
@@ -971,6 +1010,7 @@ function CapabilitiesPane({
 					<TabLabel label="[p]rmt" active={activeTab === 'prompts'} />
 				</Box>
 			)}
+			<ScrollIndicator direction="up" count={showList ? scrollWin.topHidden : 0} env={env} />
 			{!disabledByInitError && shouldShowLoading && (
 				<Box flexDirection="row">
 					<Spinner env={env} />
@@ -993,9 +1033,10 @@ function CapabilitiesPane({
 						no {kindLabel[activeTab]} exposed
 					</Text>
 				)}
-			{!disabledByInitError &&
-				tabState.items.map((item, i) => {
-					const isSelected = i === tabState.selectedIndex;
+			{showList &&
+				tabState.items.slice(scrollWin.startIndex, scrollWin.endIndex).map((item, i) => {
+					const absoluteIndex = scrollWin.startIndex + i;
+					const isSelected = absoluteIndex === tabState.selectedIndex;
 					return (
 						<Text
 							key={item.name}
@@ -1006,8 +1047,25 @@ function CapabilitiesPane({
 						</Text>
 					);
 				})}
+			<ScrollIndicator direction="down" count={showList ? scrollWin.bottomHidden : 0} env={env} />
 		</Box>
 	);
+}
+
+function ScrollIndicator({
+	direction,
+	count,
+	env,
+}: {
+	direction: 'up' | 'down';
+	count: number;
+	env: UiEnv;
+}): React.ReactElement {
+	// design-spec §2.6: rows are always reserved so scrolling never causes a
+	// 1-row layout jump. Blank when count === 0.
+	if (count <= 0) return <Text> </Text>;
+	const arrow = env.ascii ? (direction === 'up' ? '^' : 'v') : direction === 'up' ? '↑' : '↓';
+	return <Text dimColor>{`${arrow} ${count}`}</Text>;
 }
 
 function DetailPane({
