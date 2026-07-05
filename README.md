@@ -10,19 +10,15 @@ Building MCP servers today usually means hand-rolling JSON-RPC payloads to test 
 
 The name comes from Argus Panoptes — the many-eyed watcher of Greek myth. Fitting for a tool whose job is to see everything an MCP server exposes.
 
-## Status
+## Features
 
-🚧 **MVP feature-complete, pre-release.** All implementation tickets under [PRD #1](https://github.com/itonskie/argus/issues/1) are landed on `prd-1-argus-mvp`. Release cutting shortly.
-
-## MVP scope
-
-- Connect to any MCP server over **stdio** (SSE/HTTP transports are post-MVP — see [ADR 4](./docs/adrs/4-stdio-only-transport-mvp.md))
-- List **tools**, **resources**, and **prompts** from the connected server
-- **Invoke** any tool with an auto-generated form driven by its JSON Schema (graceful ladder from primitive fields to raw-JSON textarea — see [ADR 5](./docs/adrs/5-graceful-ladder-form-fallback.md))
+- Connect to any MCP server over **stdio**
+- Browse **tools**, **resources**, and **prompts** exposed by the server
+- **Invoke** any tool through an auto-generated form driven by its JSON Schema — falls back gracefully to a raw-JSON textarea for shapes the form-renderer can't ladder into inputs
 - Open large responses in `$PAGER`
-- Zero on-disk state — see [ADR 3](./docs/adrs/3-zero-disk-state-mvp.md)
+- Nothing written to disk — every session is ephemeral
 
-Deferred to later: SSE / HTTP transports, save-and-replay sessions, OAuth flows, multi-server-at-once, eval suites.
+Coming later: SSE / HTTP transports, save-and-replay sessions, OAuth flows, multi-server-at-once.
 
 ## Stack
 
@@ -37,7 +33,7 @@ Deferred to later: SSE / HTTP transports, save-and-replay sessions, OAuth flows,
 
 ## Install
 
-Requires **Node 20+**. Once the first release is published:
+Requires **Node 20+**.
 
 ```bash
 # One-shot — fetches, runs, discards.
@@ -48,7 +44,7 @@ npm i -g @itonskie/argus
 argus <path-to-mcp-server-script>
 ```
 
-`<path-to-mcp-server-script>` is a JavaScript entry point (`.js` / `.mjs` / `.cjs`) or an executable that speaks MCP over stdio. argus stats the path, spawns the server as a child process, and connects over stdio.
+`<path-to-mcp-server-script>` is a JavaScript entry point (`.js` / `.mjs` / `.cjs`) or an executable that speaks MCP over stdio. argus spawns it as a child process and connects over stdio.
 
 ## Development
 
