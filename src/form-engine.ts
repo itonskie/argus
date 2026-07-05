@@ -15,7 +15,7 @@ export type FormFieldKind =
 	  }
 	| {
 			kind: 'raw-json';
-			reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary';
+			reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary' | 'open-object';
 	  };
 
 export type FormField = {
@@ -40,6 +40,20 @@ export type SubmitResult =
 
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+// An object schema is "open" when the payload can carry arbitrary keys the
+// form-engine cannot ladder into fixed inputs: no populated `properties`, and
+// not explicitly closed via `additionalProperties: false`. Covers the JSON
+// Schema idioms `{ additionalProperties: {} }`, `{ additionalProperties: true }`,
+// `{ patternProperties: {...} }`, and bare `{ type: "object" }` (which defaults
+// to open per JSON Schema).
+function isOpenObjectSchema(schema: Record<string, unknown>): boolean {
+	if (schema.type !== 'object') return false;
+	const hasProps = isRecord(schema.properties) && Object.keys(schema.properties).length > 0;
+	if (hasProps) return false;
+	if (schema.additionalProperties === false) return false;
+	return true;
 }
 
 function primitiveItemKind(itemsSchema: unknown): 'string' | 'number' | 'boolean' | null {
@@ -76,6 +90,9 @@ function classifyProperty(
 	if (type === 'number' || type === 'integer') return { kind: 'number' };
 	if (type === 'boolean') return { kind: 'boolean' };
 	if (type === 'object') {
+		if (isOpenObjectSchema(propSchema)) {
+			return { kind: 'raw-json', reason: 'open-object' };
+		}
 		return {
 			kind: 'object',
 			fields: fieldsFromObjectSchema(propSchema, [...pathPrefix, propertyName]),
@@ -124,6 +141,21 @@ export function schemaToForm(schema: JSONSchema): FormSpec {
 		throw new Error(
 			`top-level schema must be an object schema — got type ${JSON.stringify(schema?.type)}`,
 		);
+	}
+	// Top-level open-object: the whole payload is arbitrary JSON. Emit a
+	// single synthetic root field — path=[] is the sentinel `assemblePayload`
+	// uses to return the parsed value directly, unwrapped.
+	if (isOpenObjectSchema(schema)) {
+		return {
+			fields: [
+				{
+					path: [],
+					label: 'value',
+					required: true,
+					fieldKind: { kind: 'raw-json', reason: 'open-object' },
+				},
+			],
+		};
 	}
 	return { fields: fieldsFromObjectSchema(schema, []) };
 }
@@ -211,11 +243,14 @@ function assembleFieldValue(
 	return { present: true, value: raw };
 }
 
-function assemblePayload(
-	spec: FormSpec,
-	state: FormState,
-	errors: ParseError[],
-): Record<string, unknown> {
+function assemblePayload(spec: FormSpec, state: FormState, errors: ParseError[]): unknown {
+	// Top-level open-object: a single synthetic field with an empty path
+	// carries the entire payload as parsed JSON. Fully-open schemas accept
+	// `{}`, so an absent (empty-textarea) value falls back to `{}`.
+	if (spec.fields.length === 1 && spec.fields[0]?.path.length === 0) {
+		const { present, value } = assembleFieldValue(spec.fields[0], state, errors);
+		return present ? value : {};
+	}
 	const out: Record<string, unknown> = {};
 	for (const field of spec.fields) {
 		const { present, value } = assembleFieldValue(field, state, errors);

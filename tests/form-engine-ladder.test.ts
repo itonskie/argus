@@ -78,7 +78,7 @@ describe('form-engine.schemaToForm — graceful ladder', () => {
 		const cases: Array<{
 			label: string;
 			propertySchema: JSONSchema;
-			reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary';
+			reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary' | 'open-object';
 			topLevelExtras?: JSONSchema;
 		}> = [
 			{
@@ -119,6 +119,29 @@ describe('form-engine.schemaToForm — graceful ladder', () => {
 				propertySchema: { type: 'string', format: 'binary' },
 				reason: 'binary',
 			},
+			{
+				label: 'open object (additionalProperties: {})',
+				propertySchema: { type: 'object', additionalProperties: {} },
+				reason: 'open-object',
+			},
+			{
+				label: 'open object (additionalProperties: true)',
+				propertySchema: { type: 'object', additionalProperties: true },
+				reason: 'open-object',
+			},
+			{
+				label: 'open object (patternProperties only)',
+				propertySchema: {
+					type: 'object',
+					patternProperties: { '^x-': { type: 'string' } },
+				},
+				reason: 'open-object',
+			},
+			{
+				label: 'open object (bare {type:object} with no constraints)',
+				propertySchema: { type: 'object' },
+				reason: 'open-object',
+			},
 		];
 
 		for (const c of cases) {
@@ -136,6 +159,96 @@ describe('form-engine.schemaToForm — graceful ladder', () => {
 				});
 			});
 		}
+	});
+
+	describe('open-object corner cases', () => {
+		it('does NOT treat a closed empty object as open-object', () => {
+			// `additionalProperties: false` makes this a truly-closed empty
+			// object — the payload must literally be `{}`. Do not fall back.
+			const schema: JSONSchema = {
+				type: 'object',
+				properties: {
+					meta: { type: 'object', properties: {}, additionalProperties: false },
+				},
+			};
+			const spec = schemaToForm(schema);
+			expect(spec.fields[0]?.fieldKind.kind).toBe('object');
+		});
+
+		describe('top-level open-object schemas', () => {
+			it('produces a single raw-JSON field for a fully-open top-level schema', () => {
+				const schema: JSONSchema = { type: 'object', additionalProperties: {} };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				const field = spec.fields[0];
+				// Empty path signals "field is the whole payload" to the assembler.
+				expect(field?.path).toEqual([]);
+				expect(field?.required).toBe(true);
+				expect(field?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('also fires for additionalProperties: true at the top level', () => {
+				const schema: JSONSchema = { type: 'object', additionalProperties: true };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				expect(spec.fields[0]?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('also fires for a bare top-level {type:"object"} with no constraints', () => {
+				const schema: JSONSchema = { type: 'object' };
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toHaveLength(1);
+				expect(spec.fields[0]?.fieldKind).toEqual<FormFieldKind>({
+					kind: 'raw-json',
+					reason: 'open-object',
+				});
+			});
+
+			it('does NOT fire for a closed empty top-level schema', () => {
+				// {additionalProperties: false, properties: {}} — the tool takes
+				// literally `{}`. Existing behavior: empty form, payload is `{}`.
+				const schema: JSONSchema = {
+					type: 'object',
+					properties: {},
+					additionalProperties: false,
+				};
+				const spec = schemaToForm(schema);
+				expect(spec.fields).toEqual([]);
+			});
+		});
+
+		it('matches the lathe-mcp repro schema — required `data` renders as raw-JSON', () => {
+			// Exact reproduction of the schema in issue #16: a required object
+			// property with `additionalProperties: {}` used to render as a
+			// collapsed object with zero sub-fields (un-fillable).
+			const schema: JSONSchema = {
+				type: 'object',
+				properties: {
+					data: {
+						type: 'object',
+						additionalProperties: {},
+						description: 'Resume data object',
+					},
+					template: { type: 'string' },
+				},
+				required: ['data', 'template'],
+			};
+			const spec = schemaToForm(schema);
+			expect(spec.fields).toHaveLength(2);
+			const dataField = spec.fields.find((f) => f.label === 'data');
+			expect(dataField?.required).toBe(true);
+			expect(dataField?.fieldKind).toEqual<FormFieldKind>({
+				kind: 'raw-json',
+				reason: 'open-object',
+			});
+			expect(dataField?.description).toBe('Resume data object');
+		});
 	});
 
 	it('does not throw on the full mixed schema (nested + array + raw-json fallbacks side-by-side)', () => {
@@ -273,6 +386,93 @@ describe('form-engine.submit — graceful ladder', () => {
 			expect(result).toEqual({
 				valid: true,
 				payload: { items: [{ id: 1 }, { id: 2 }] },
+			});
+		});
+
+		describe('open-object raw-JSON', () => {
+			const schema: JSONSchema = {
+				type: 'object',
+				properties: {
+					data: { type: 'object', additionalProperties: {} },
+					template: { type: 'string' },
+				},
+				required: ['data', 'template'],
+			};
+
+			it('parses a JSON object typed into the raw-JSON field', async () => {
+				const result = await submit(schema, {
+					data: '{"name":"ada","age":42}',
+					template: 'basic',
+				});
+				expect(result).toEqual({
+					valid: true,
+					payload: {
+						data: { name: 'ada', age: 42 },
+						template: 'basic',
+					},
+				});
+			});
+
+			it('flags a missing required open-object field', async () => {
+				const result = await submit(schema, { template: 'basic' });
+				expect(result.valid).toBe(false);
+				if (result.valid) throw new Error('expected invalid');
+				expect(result.errors.some((e) => e.path.join('.') === 'data')).toBe(true);
+			});
+
+			it('reports a JSON syntax error before ajv runs', async () => {
+				const result = await submit(schema, {
+					data: '{not-json',
+					template: 'basic',
+				});
+				expect(result.valid).toBe(false);
+				if (result.valid) throw new Error('expected invalid');
+				const err = result.errors.find((e) => e.path.join('.') === 'data');
+				expect(err).toBeDefined();
+				expect(err?.message.toLowerCase()).toMatch(/json|parse|syntax/);
+			});
+
+			it('rejects a non-object JSON payload for a required object field', async () => {
+				// Typing `42` — valid JSON but not an object; ajv should reject.
+				const result = await submit(schema, {
+					data: '42',
+					template: 'basic',
+				});
+				expect(result.valid).toBe(false);
+			});
+		});
+
+		describe('top-level open-object', () => {
+			const schema: JSONSchema = { type: 'object', additionalProperties: {} };
+
+			it('parses arbitrary JSON as the entire payload (no wrapping key)', async () => {
+				// The synthetic root field's state key is the empty string.
+				const result = await submit(schema, {
+					'': '{"anything":"goes","nested":{"a":1}}',
+				});
+				expect(result).toEqual({
+					valid: true,
+					payload: { anything: 'goes', nested: { a: 1 } },
+				});
+			});
+
+			it('reports a JSON syntax error at the root path', async () => {
+				const result = await submit(schema, { '': '{not-json' });
+				expect(result.valid).toBe(false);
+				if (result.valid) throw new Error('expected invalid');
+				expect(result.errors[0]?.message.toLowerCase()).toMatch(/json|parse|syntax/);
+			});
+
+			it('rejects a non-object JSON payload against the top-level object schema', async () => {
+				const result = await submit(schema, { '': '"just a string"' });
+				expect(result.valid).toBe(false);
+			});
+
+			it('treats an empty textarea as {} for a fully-open top-level schema', async () => {
+				// A completely-open top-level schema accepts `{}` — an empty
+				// textarea should still submit successfully.
+				const result = await submit(schema, { '': '' });
+				expect(result).toEqual({ valid: true, payload: {} });
 			});
 		});
 

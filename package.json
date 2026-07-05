@@ -28,10 +28,13 @@
     "lint": "biome check",
     "format": "biome check --write",
     "startup-budget": "pnpm build && node scripts/startup-budget.mjs",
-    "smoke": "pnpm build && node scripts/smoke.mjs"
+    "smoke": "pnpm build && node scripts/smoke.mjs",
+    "changeset": "changeset",
+    "release": "pnpm build && changeset publish"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
+    "@changesets/cli": "^2.31.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
