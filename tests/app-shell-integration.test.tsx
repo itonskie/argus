@@ -59,8 +59,8 @@ describe('app-shell tracer bullet', () => {
 		expect(frame).toContain('echo');
 		// [t]ools tab label
 		expect(frame).toContain('[t]ools');
-		// Status bar hints for middle pane
-		expect(frame).toContain('j/k list');
+		// Status bar hints for middle pane (design-spec §3.6)
+		expect(frame).toContain('↑/↓ list');
 	});
 
 	it('state markers are textual (● / pid / [t] / label) — distinguishable without color', async () => {

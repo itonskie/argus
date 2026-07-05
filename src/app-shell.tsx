@@ -753,17 +753,40 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			return;
 		}
 
+		// design-spec §5.1: tab / shift+tab cycle capability tabs from the middle
+		// pane and right-pane Preview. Form owns tab for field nav and is handled
+		// above; Result mode's tab handling is a later slice.
+		if (key.tab && (focusedPane === 'middle' || focusedPane === 'right')) {
+			const order: Tab[] = ['tools', 'resources', 'prompts'];
+			const cur = order.indexOf(activeTab);
+			const delta = key.shift ? -1 : 1;
+			const nextTab = order[(cur + delta + order.length) % order.length];
+			if (nextTab && nextTab !== activeTab) {
+				setActiveTab(nextTab);
+				setPreviewScroll(0);
+				setMiddleScroll(0);
+			}
+			return;
+		}
+
 		if (key.return && focusedPane === 'middle') {
 			const item = activeTabState.items[activeTabState.selectedIndex];
 			if (item) void enterFormMode(item, activeTab);
 			return;
 		}
 
-		if ((input === 'j' || input === 'k') && focusedPane === 'middle') {
+		// design-spec §5.1: arrow keys alias vim keys — ↑/↓ for list nav in the
+		// middle pane and scroll in the right pane, ←/→ for pane focus movement.
+		const wantsUp = input === 'k' || key.upArrow;
+		const wantsDown = input === 'j' || key.downArrow;
+		const wantsLeft = input === 'h' || key.leftArrow;
+		const wantsRight = input === 'l' || key.rightArrow;
+
+		if ((wantsDown || wantsUp) && focusedPane === 'middle') {
 			const items = activeTabState.items;
 			if (items.length === 0) return;
 			const cur = activeTabState.selectedIndex;
-			const next = input === 'j' ? Math.min(cur + 1, items.length - 1) : Math.max(cur - 1, 0);
+			const next = wantsDown ? Math.min(cur + 1, items.length - 1) : Math.max(cur - 1, 0);
 			if (next === cur) return;
 			const { scrollTop } = computeScrollWindow({
 				totalRows: items.length,
@@ -775,20 +798,20 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			if (scrollTop !== middleScroll) setMiddleScroll(scrollTop);
 			return;
 		}
-		if (input === 'j' && focusedPane === 'right') {
+		if (wantsDown && focusedPane === 'right') {
 			setPreviewScroll((n) => n + 1);
 			return;
 		}
-		if (input === 'k' && focusedPane === 'right') {
+		if (wantsUp && focusedPane === 'right') {
 			setPreviewScroll((n) => Math.max(n - 1, 0));
 			return;
 		}
-		if (input === 'h') {
+		if (wantsLeft) {
 			if (focusedPane === 'middle') setFocusedPane('left');
 			else if (focusedPane === 'right') setFocusedPane('middle');
 			return;
 		}
-		if (input === 'l') {
+		if (wantsRight) {
 			if (focusedPane === 'left') setFocusedPane('middle');
 			else if (focusedPane === 'middle') setFocusedPane('right');
 			return;
@@ -1561,17 +1584,24 @@ function StatusBar({
 	rightMode: RightMode;
 	env: UiEnv;
 }): React.ReactElement {
+	// design-spec §2.6: ASCII fallback applies globally, so arrow glyphs in
+	// hints also degrade to plain-ASCII when ARGUS_ASCII=1.
+	const leftRight = env.ascii ? '</>' : '←/→';
+	const upDown = env.ascii ? '^/v' : '↑/↓';
+	const upArrow = env.ascii ? '^' : '↑';
 	let hints: string;
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
-		hints = 'tab/shift-tab fields  enter submit  esc cancel  ↑ last args  q quit';
+		hints = `tab/shift-tab fields  enter submit  esc cancel  ${upArrow} last args  q quit`;
 	} else if (rightMode.kind === 'result') {
 		hints = 'j/k scroll  o open in $PAGER  esc back to form  h back  q quit';
 	} else if (focusedPane === 'left') {
 		hints = 'q quit';
 	} else if (focusedPane === 'middle') {
-		hints = 'h/l panes  j/k list  t/r/p tabs  enter form  q quit';
+		// design-spec §3.6: arrows + tab are the discoverable path; vim keys
+		// still work but are not advertised.
+		hints = `${leftRight} panes  ${upDown} list  tab tabs  enter form  q quit`;
 	} else {
-		hints = 'h back  j/k scroll  t/r/p tabs  q quit';
+		hints = `${leftRight} panes  ${upDown} scroll  tab tabs  q quit`;
 	}
 
 	const blip =
