@@ -53,6 +53,64 @@ function scrollLines(lines: React.ReactNode[], scroll: number): React.ReactNode[
 	return lines.slice(start);
 }
 
+// Enumerates every rendered line for the given result so the app-shell can
+// wire it through `scroll-window` and reserve stable indicator rows.
+// ResultView and the app-shell share this so line counts agree.
+export function enumerateResultLines(result: InvokeResult): React.ReactNode[] {
+	if (!result.ok) return [errorBlock(result.error)];
+	const payload = result.result;
+	if (isEmpty(payload)) {
+		return [
+			<Text key="empty" dimColor italic>
+				(empty response)
+			</Text>,
+		];
+	}
+	const classified = classifyMcpResult(payload);
+	if (classified.kind === 'text') {
+		const bytes = Buffer.byteLength(classified.text, 'utf8');
+		const kb = Math.round(bytes / 1024);
+		const lines: React.ReactNode[] = [];
+		if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
+			lines.push(
+				<Text key="warn" color="yellow" bold>
+					warning: response is {kb} KB — press o to open in $PAGER
+				</Text>,
+			);
+		}
+		lines.push(
+			<Text key="prefix" bold>
+				[text]
+			</Text>,
+		);
+		lines.push(<Text key="content">{classified.text}</Text>);
+		return lines;
+	}
+	if (classified.kind === 'base64') {
+		const kb = Math.round(classified.sizeBytes / 1024);
+		return [
+			<Text key="prefix" bold>
+				[base64]
+			</Text>,
+			<Text key="meta">
+				{classified.mimeType ?? 'application/octet-stream'} — {kb} KB
+			</Text>,
+		];
+	}
+	const jsonLines = renderJson(classified.value);
+	const bytes = Buffer.byteLength(JSON.stringify(classified.value), 'utf8');
+	const kb = Math.round(bytes / 1024);
+	if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
+		return [
+			<Text key="warn" color="yellow" bold>
+				warning: response is {kb} KB — press o to open in $PAGER
+			</Text>,
+			...jsonLines.slice(0, LARGE_RESPONSE_INLINE_LINE_LIMIT),
+		];
+	}
+	return jsonLines;
+}
+
 // Two-space indent per depth. Line-by-line so each token can wear its own color.
 function renderJson(value: unknown, indent = 0): React.ReactNode[] {
 	const pad = '  '.repeat(indent);
@@ -209,61 +267,6 @@ export function ResultView({
 	result: InvokeResult;
 	scroll: number;
 }): React.ReactElement {
-	if (!result.ok) {
-		return <Box flexDirection="column">{errorBlock(result.error)}</Box>;
-	}
-	const payload = result.result;
-	if (isEmpty(payload)) {
-		return (
-			<Text dimColor italic>
-				(empty response)
-			</Text>
-		);
-	}
-	const classified = classifyMcpResult(payload);
-
-	if (classified.kind === 'text') {
-		const bytes = Buffer.byteLength(classified.text, 'utf8');
-		const kb = Math.round(bytes / 1024);
-		const lines: React.ReactNode[] = [
-			<Text key="prefix" bold>
-				[text]
-			</Text>,
-			<Text key="content">{classified.text}</Text>,
-		];
-		if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
-			lines.unshift(
-				<Text key="warn" color="yellow" bold>
-					warning: response is {kb} KB — press o to open in $PAGER
-				</Text>,
-			);
-		}
-		return <Box flexDirection="column">{scrollLines(lines, scroll)}</Box>;
-	}
-	if (classified.kind === 'base64') {
-		const kb = Math.round(classified.sizeBytes / 1024);
-		return (
-			<Box flexDirection="column">
-				<Text bold>[base64]</Text>
-				<Text>
-					{classified.mimeType ?? 'application/octet-stream'} — {kb} KB
-				</Text>
-			</Box>
-		);
-	}
-	const jsonLines = renderJson(classified.value);
-	const bytes = Buffer.byteLength(JSON.stringify(classified.value), 'utf8');
-	const kb = Math.round(bytes / 1024);
-	const lines: React.ReactNode[] = [];
-	if (kb >= LARGE_RESPONSE_HINT_THRESHOLD_KB) {
-		lines.push(
-			<Text key="warn" color="yellow" bold>
-				warning: response is {kb} KB — press o to open in $PAGER
-			</Text>,
-		);
-		lines.push(...jsonLines.slice(0, LARGE_RESPONSE_INLINE_LINE_LIMIT));
-	} else {
-		lines.push(...jsonLines);
-	}
+	const lines = enumerateResultLines(result);
 	return <Box flexDirection="column">{scrollLines(lines, scroll)}</Box>;
 }
