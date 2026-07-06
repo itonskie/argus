@@ -231,6 +231,82 @@ describe('app-shell — arrow-key aliases + tab/shift-tab cycles', () => {
 		expect(frame).not.toContain('t/r/p tabs');
 	});
 
+	// PRD #19: in Form mode ↑ / ↓ alias shift-tab / tab so the arrow-key cluster
+	// stays consistent with the rest of the app.
+	it('↓ in Form mode advances to the next field (alias for tab)', async () => {
+		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
+
+		// Enter form for nested-object (has two nested fields — `name`, `age`).
+		// Advance selection to nested-object first.
+		for (let i = 0; i < 3; i++) await pressKey(instance, DOWN);
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		// Type 'A' into the initial focused field (user.name).
+		await pressKey(instance, 'A');
+		await pressKey(instance, DOWN); // ↓ moves focus to user.age.
+		await pressKey(instance, 'B');
+
+		const frame = instance?.lastFrame() ?? '';
+		// Both values appear in the frame — ↓ moved focus, letting B type into the second field.
+		expect(frame).toContain('A');
+		expect(frame).toContain('B');
+	});
+
+	it('↑ in Form mode moves to the previous field (alias for shift-tab)', async () => {
+		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
+
+		for (let i = 0; i < 3; i++) await pressKey(instance, DOWN);
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		await pressKey(instance, DOWN); // to user.age
+		await pressKey(instance, 'B');
+		await pressKey(instance, UP); // back to user.name
+		await pressKey(instance, 'A');
+
+		const frame = instance?.lastFrame() ?? '';
+		expect(frame).toContain('A');
+		expect(frame).toContain('B');
+	});
+
+	it('← / → in Form mode are silent no-ops (do not move panes, do not type)', async () => {
+		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
+
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		await pressKey(instance, LEFT);
+		await pressKey(instance, RIGHT);
+
+		// Still in Form mode; nothing typed into the input.
+		const frame = instance?.lastFrame() ?? '';
+		expect(frame).toContain('Form');
+		// Focus indicator (bold+inverse label) confirms we didn't leave the pane.
+		expect(frame).toContain('message');
+	});
+
+	it('form status-bar hint advertises ctrl+r for last args (relocated from ↑)', async () => {
+		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
+
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		const frame = instance?.lastFrame() ?? '';
+		// design-spec §3.6, focus = right pane, form
+		expect(frame).toContain('tab/shift-tab fields');
+		expect(frame).toContain('enter submit');
+		expect(frame).toContain('esc cancel');
+		expect(frame).toContain('ctrl+r last args');
+		expect(frame).toContain('q quit');
+		// Old ↑-based recall hint must be gone.
+		expect(frame).not.toContain('↑ last args');
+	});
+
 	it('right-pane preview status-bar hint advertises arrows + tab, drops vim keys', async () => {
 		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
 
