@@ -186,7 +186,9 @@ describe('app-shell — Form mode → invoke → Result', () => {
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('Result'), 8_000);
 
 		const frame = instance?.lastFrame() ?? '';
-		expect(frame).toContain('j/k scroll');
+		// design-spec §3.6: arrows + tab are the discoverable path in Result mode.
+		expect(frame).toContain('↑/↓ scroll');
+		expect(frame).toContain('tab tabs');
 		expect(frame).toContain('esc');
 	});
 

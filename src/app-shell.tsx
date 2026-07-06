@@ -14,7 +14,7 @@ import {
 	type McpError,
 } from './mcp-client.js';
 import { spawnPager } from './pager.js';
-import { ResultView, serializeResultForPager } from './result-view.js';
+import { enumerateResultLines, serializeResultForPager } from './result-view.js';
 import { computeScrollWindow } from './scroll-window.js';
 import { Spinner } from './spinner.js';
 
@@ -27,6 +27,13 @@ const MIN_ROWS = 24;
 // but the clamp is cheap insurance.
 function middleViewportHeight(terminalRows: number): number {
 	return Math.max(1, terminalRows - 7);
+}
+
+// design-spec §2.5: right-pane content budget is
+// (rows − 1 status bar − 2 border − 1 title − 2 indicators) usable rows.
+// No tab-header row here — tabs live in the middle pane only.
+function rightPaneViewportHeight(terminalRows: number): number {
+	return Math.max(1, terminalRows - 6);
 }
 
 // design-spec §1: three axes of border style — ARGUS_ASCII takes precedence,
@@ -670,11 +677,31 @@ export function App({ path, env }: AppProps): React.ReactElement {
 				setRightMode({ kind: 'form', ctx: rightMode.ctx });
 				return;
 			}
-			if (input === 'j') {
-				setResultScroll((n) => n + 1);
+			// design-spec §5.1: tab / shift+tab in Result exits Result back to
+			// Preview and cycles the capability tab.
+			if (key.tab) {
+				const order: Tab[] = ['tools', 'resources', 'prompts'];
+				const cur = order.indexOf(activeTab);
+				const delta = key.shift ? -1 : 1;
+				const nextTab = order[(cur + delta + order.length) % order.length];
+				setRightMode({ kind: 'preview' });
+				setResultScroll(0);
+				setFocusedPane('middle');
+				if (nextTab && nextTab !== activeTab) {
+					setActiveTab(nextTab);
+					setPreviewScroll(0);
+					setMiddleScroll(0);
+				}
 				return;
 			}
-			if (input === 'k') {
+			// design-spec §5.1: ↑ / ↓ scroll one line each; arrows are the
+			// discoverable path, j / k remain as aliases.
+			const resultMax = Math.max(0, resultLines.length - rightViewport);
+			if (input === 'j' || key.downArrow) {
+				setResultScroll((n) => Math.min(n + 1, resultMax));
+				return;
+			}
+			if (input === 'k' || key.upArrow) {
 				setResultScroll((n) => Math.max(n - 1, 0));
 				return;
 			}
@@ -799,7 +826,8 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			return;
 		}
 		if (wantsDown && focusedPane === 'right') {
-			setPreviewScroll((n) => n + 1);
+			const max = Math.max(0, previewLines.length - rightViewport);
+			setPreviewScroll((n) => Math.min(n + 1, max));
 			return;
 		}
 		if (wantsUp && focusedPane === 'right') {
@@ -822,6 +850,31 @@ export function App({ path, env }: AppProps): React.ReactElement {
 		activeTabState.items.length > 0 && activeTabState.selectedIndex < activeTabState.items.length
 			? activeTabState.items[activeTabState.selectedIndex]
 			: undefined;
+
+	// design-spec §2.5: preview + result panes lock to a fixed height and scroll
+	// their content internally. Both scroll windows are computed here at App
+	// level so the key handler can consult totals when clamping scroll increments.
+	const rightViewport = rightPaneViewportHeight(rows);
+	const previewLines = useMemo(
+		() => (selectedItem ? buildPreviewLines(activeTab, selectedItem) : []),
+		[activeTab, selectedItem],
+	);
+	const previewScrollWin = computeScrollWindow({
+		totalRows: previewLines.length,
+		focusedIndex: -1,
+		viewportHeight: rightViewport,
+		previousScrollTop: previewScroll,
+	});
+	const resultLines = useMemo(
+		() => (rightMode.kind === 'result' ? enumerateResultLines(rightMode.result) : []),
+		[rightMode],
+	);
+	const resultScrollWin = computeScrollWindow({
+		totalRows: resultLines.length,
+		focusedIndex: -1,
+		viewportHeight: rightViewport,
+		previousScrollTop: resultScroll,
+	});
 
 	// design-spec §2.3: below 80×24 we replace the layout with a single-line
 	// gate. State stays mounted (App itself doesn't unmount), so focus /
@@ -850,11 +903,13 @@ export function App({ path, env }: AppProps): React.ReactElement {
 				/>
 				<DetailPane
 					focused={focusedPane === 'right'}
-					activeTab={activeTab}
 					selected={selectedItem}
-					scroll={previewScroll}
+					previewLines={previewLines}
+					previewScrollWin={previewScrollWin}
 					rightMode={rightMode}
-					resultScroll={resultScroll}
+					resultLines={resultLines}
+					resultScrollWin={resultScrollWin}
+					terminalRows={rows}
 					connState={connState}
 					env={uiEnv}
 				/>
@@ -895,6 +950,7 @@ function ConnectionPane({
 				borderStyle={bStyle}
 				borderColor={env.noColor ? undefined : focused ? 'cyan' : 'red'}
 				width={18}
+				flexShrink={0}
 				flexDirection="column"
 				paddingX={1}
 			>
@@ -911,6 +967,7 @@ function ConnectionPane({
 			borderStyle={bStyle}
 			borderColor={focusBorderColor(env, focused)}
 			width={18}
+			flexShrink={0}
 			flexDirection="column"
 			paddingX={1}
 		>
@@ -1020,6 +1077,7 @@ function CapabilitiesPane({
 			borderStyle={borderStyleFor(env, focused)}
 			borderColor={focusBorderColor(env, focused)}
 			width={22}
+			flexShrink={0}
 			height={Math.max(3, terminalRows - 1)}
 			flexDirection="column"
 		>
@@ -1093,20 +1151,24 @@ function ScrollIndicator({
 
 function DetailPane({
 	focused,
-	activeTab,
 	selected,
-	scroll,
+	previewLines,
+	previewScrollWin,
 	rightMode,
-	resultScroll,
+	resultLines,
+	resultScrollWin,
+	terminalRows,
 	connState,
 	env,
 }: {
 	focused: boolean;
-	activeTab: Tab;
 	selected: Capability | undefined;
-	scroll: number;
+	previewLines: React.ReactNode[];
+	previewScrollWin: ReturnType<typeof computeScrollWindow>;
 	rightMode: RightMode;
-	resultScroll: number;
+	resultLines: React.ReactNode[];
+	resultScrollWin: ReturnType<typeof computeScrollWindow>;
+	terminalRows: number;
 	connState: ConnectionState;
 	env: UiEnv;
 }): React.ReactElement {
@@ -1121,23 +1183,39 @@ function DetailPane({
 			: rightMode.kind === 'result'
 				? 'Result'
 				: 'Detail';
+	// design-spec §2.5: right pane locks to a fixed height that fills the outer
+	// frame. Content that overflows scrolls internally via the indicator rows.
+	const paneHeight = Math.max(3, terminalRows - 1);
+	const previewVisible = previewLines.slice(previewScrollWin.startIndex, previewScrollWin.endIndex);
+	const resultVisible = resultLines.slice(resultScrollWin.startIndex, resultScrollWin.endIndex);
+	// Only render scroll indicators for modes wired through scroll-window this
+	// slice (Preview + Result). Form / Invoking keep their existing rendering
+	// until #24 adds the flattener + indicator wiring.
+	const showScrollIndicators =
+		!initializeErrored && (rightMode.kind === 'preview' || rightMode.kind === 'result');
+	const activeScrollWin = rightMode.kind === 'result' ? resultScrollWin : previewScrollWin;
 	return (
 		<Box
 			borderStyle={borderStyleFor(env, focused)}
 			borderColor={focusBorderColor(env, focused)}
 			flexGrow={1}
+			height={paneHeight}
 			flexDirection="column"
 			paddingX={1}
 		>
 			<Text bold={focused} underline={focused} dimColor={initializeErrored}>
 				{title}
 			</Text>
+			{showScrollIndicators && (
+				<ScrollIndicator direction="up" count={activeScrollWin.topHidden} env={env} />
+			)}
 			{!initializeErrored && rightMode.kind === 'preview' && selected === undefined && (
 				<Text dimColor>select an item to preview</Text>
 			)}
-			{!initializeErrored && rightMode.kind === 'preview' && selected !== undefined && (
-				<PreviewBody activeTab={activeTab} item={selected} scroll={scroll} />
-			)}
+			{!initializeErrored &&
+				rightMode.kind === 'preview' &&
+				selected !== undefined &&
+				previewVisible}
 			{!initializeErrored && (rightMode.kind === 'form' || rightMode.kind === 'invoking') && (
 				<FormBody
 					ctx={rightMode.ctx}
@@ -1146,22 +1224,15 @@ function DetailPane({
 					env={env}
 				/>
 			)}
-			{!initializeErrored && rightMode.kind === 'result' && (
-				<ResultView result={rightMode.result} scroll={resultScroll} />
+			{!initializeErrored && rightMode.kind === 'result' && resultVisible}
+			{showScrollIndicators && (
+				<ScrollIndicator direction="down" count={activeScrollWin.bottomHidden} env={env} />
 			)}
 		</Box>
 	);
 }
 
-function PreviewBody({
-	activeTab,
-	item,
-	scroll,
-}: {
-	activeTab: Tab;
-	item: Capability;
-	scroll: number;
-}): React.ReactElement {
+function buildPreviewLines(activeTab: Tab, item: Capability): React.ReactNode[] {
 	const description = item.description ?? '';
 	const hasDescription = description.length > 0;
 	const fields = schemaFields(item.schema);
@@ -1171,31 +1242,45 @@ function PreviewBody({
 		if (item.mimeType) metadataLines.push(`mimeType: ${item.mimeType}`);
 	}
 
+	// design-spec §2.5 / §2.6: preview lines are windowed by row count, so each
+	// logical line must consume exactly one visual row. Truncate long strings
+	// with `…` rather than let them wrap — otherwise the scroll-indicator counts
+	// disagree with the visible frame.
 	const bodyLines: React.ReactNode[] = [];
 	bodyLines.push(
-		<Text key="name" bold>
+		<Text key="name" bold wrap="truncate-end">
 			{item.name}
 		</Text>,
 	);
 	bodyLines.push(
 		hasDescription ? (
-			<Text key="desc">{description}</Text>
+			<Text key="desc" wrap="truncate-end">
+				{description}
+			</Text>
 		) : (
-			<Text key="desc" dimColor>
+			<Text key="desc" dimColor wrap="truncate-end">
 				(no description provided)
 			</Text>
 		),
 	);
 	for (const line of metadataLines) {
-		bodyLines.push(<Text key={`meta-${line}`}>{line}</Text>);
+		bodyLines.push(
+			<Text key={`meta-${line}`} wrap="truncate-end">
+				{line}
+			</Text>,
+		);
 	}
 	if (fields.length > 0) {
-		bodyLines.push(<Text key="fields-header">Args:</Text>);
+		bodyLines.push(
+			<Text key="fields-header" wrap="truncate-end">
+				Args:
+			</Text>,
+		);
 		for (const f of fields) {
 			const req = f.required ? ' (required)' : '';
 			const marker = f.required ? '' : '?';
 			bodyLines.push(
-				<Text key={`f-${f.name}`}>
+				<Text key={`f-${f.name}`} wrap="truncate-end">
 					{'  '}
 					{f.name}
 					{marker}: {f.type}
@@ -1204,10 +1289,7 @@ function PreviewBody({
 			);
 		}
 	}
-
-	const start = Math.min(scroll, Math.max(bodyLines.length - 1, 0));
-	const visible = bodyLines.slice(start);
-	return <>{visible}</>;
+	return bodyLines;
 }
 
 function primitiveHint(kind: FormFieldKind): string {
@@ -1593,7 +1675,10 @@ function StatusBar({
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
 		hints = `tab/shift-tab fields  enter submit  esc cancel  ${upArrow} last args  q quit`;
 	} else if (rightMode.kind === 'result') {
-		hints = 'j/k scroll  o open in $PAGER  esc back to form  h back  q quit';
+		// design-spec §3.6: arrows + tab are the discoverable path; vim keys
+		// (j/k) and `h back` still work but are not advertised. `s swap` is not
+		// shown until the keybind is wired (#27) so we don't advertise a no-op.
+		hints = `${upDown} scroll  tab tabs  o open in $PAGER  esc back to form  q quit`;
 	} else if (focusedPane === 'left') {
 		hints = 'q quit';
 	} else if (focusedPane === 'middle') {
