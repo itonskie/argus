@@ -1,7 +1,9 @@
 # ADR 3: Zero disk state in MVP — no `~/.argus/`
 
-**Status:** Accepted
+**Status:** Superseded by [ADR 7](7-recent-servers-history-file.md) (2026-07-05)
 **Date:** 2026-07-03
+
+> **Note (2026-07-05):** ADR 7 reverses this decision after live use surfaced repeated retype-the-path friction on every launch. The recent-servers list persists to `~/.config/argus/history.json` (opt out with `ARGUS_NO_HISTORY=1`). The reasoning below is preserved for context — it captures why we made the earlier call, not what argus does today.
 
 ## Context
 
