@@ -8,8 +8,8 @@ const FIXTURE_ENTRY = fileURLToPath(new URL('../dist/test-server-fixture.js', im
 
 type Instance = ReturnType<typeof render>;
 
-// Up-arrow escape sequence — ink decodes this into `key.upArrow`.
-const UP = '\x1b[A';
+// Ctrl+R (recall gesture) — moved off ↑ in PRD #19 so ↑ can mean "prev field".
+const CTRL_R = '\x12';
 // Shift-tab (backwards focus) — matches ink's `key.tab + key.shift`.
 const SHIFT_TAB = '\x1b[Z';
 
@@ -75,7 +75,7 @@ async function selectTool(instance: Instance, toolName: string): Promise<void> {
 	}
 }
 
-describe('app-shell — arrow-up recall', () => {
+describe('app-shell — ctrl+r recall', () => {
 	let instance: Instance | undefined;
 
 	afterEach(async () => {
@@ -109,14 +109,14 @@ describe('app-shell — arrow-up recall', () => {
 		let frame = instance?.lastFrame() ?? '';
 		expect(frame).not.toContain('hello');
 
-		// Empty field + up-arrow → recall.
-		await pressKey(instance, UP);
+		// Empty field + ctrl+r → recall.
+		await pressKey(instance, CTRL_R);
 		frame = instance?.lastFrame() ?? '';
 		expect(frame).toContain('Form');
 		expect(frame).toContain('hello');
 	});
 
-	it('up-arrow on a non-empty field is a no-op (does not overwrite user input)', async () => {
+	it('ctrl+r on a non-empty field is a no-op (does not overwrite user input)', async () => {
 		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
 
@@ -129,13 +129,13 @@ describe('app-shell — arrow-up recall', () => {
 		await pressEsc(instance);
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
 
-		// Field currently has "first". Pressing up-arrow should NOT recall — field is not empty.
-		await pressKey(instance, UP);
+		// Field currently has "first". Pressing ctrl+r should NOT recall — field is not empty.
+		await pressKey(instance, CTRL_R);
 		const frame = instance?.lastFrame() ?? '';
 		expect(frame).toContain('first');
 	});
 
-	it('tool mismatch: after echo invocation, switching to nested-object + up-arrow does not recall echo args', async () => {
+	it('tool mismatch: after echo invocation, switching to nested-object + ctrl+r does not recall echo args', async () => {
 		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
 
@@ -156,8 +156,8 @@ describe('app-shell — arrow-up recall', () => {
 		await pressReturn(instance);
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
 
-		// Empty focused field on a different tool → up-arrow must not paste echo's args.
-		await pressKey(instance, UP);
+		// Empty focused field on a different tool → ctrl+r must not paste echo's args.
+		await pressKey(instance, CTRL_R);
 		const frame = instance?.lastFrame() ?? '';
 		expect(frame).not.toContain('sentinel-echo-value');
 	});
@@ -192,7 +192,7 @@ describe('app-shell — arrow-up recall', () => {
 		expect(frame).not.toContain('alpha');
 		expect(frame).not.toContain('beta');
 
-		await pressKey(instance, UP);
+		await pressKey(instance, CTRL_R);
 		frame = instance?.lastFrame() ?? '';
 		expect(frame).toContain('alpha');
 		expect(frame).toContain('beta');
@@ -219,12 +219,12 @@ describe('app-shell — arrow-up recall', () => {
 		let frame = instance?.lastFrame() ?? '';
 		expect(frame).not.toContain('4242');
 
-		await pressKey(instance, UP);
+		await pressKey(instance, CTRL_R);
 		frame = instance?.lastFrame() ?? '';
 		expect(frame).toContain('4242');
 	});
 
-	it('cache survives Esc back to Preview and re-entering Form: clear + up-arrow still recalls', async () => {
+	it('cache survives Esc back to Preview and re-entering Form: clear + ctrl+r still recalls', async () => {
 		instance = render(React.createElement(App, { path: FIXTURE_ENTRY }));
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('echo'));
 
@@ -243,7 +243,7 @@ describe('app-shell — arrow-up recall', () => {
 		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
 
 		// Fresh Form — field starts empty.
-		await pressKey(instance, UP);
+		await pressKey(instance, CTRL_R);
 		const frame = instance?.lastFrame() ?? '';
 		expect(frame).toContain('persist');
 	});

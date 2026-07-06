@@ -4,6 +4,7 @@ import type React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { readUiEnv, type UiEnv } from './env.js';
 import type { FormField, FormFieldKind, FormSpec, FormState, SubmitResult } from './form-engine.js';
+import { flattenForm } from './form-row-flattener.js';
 import {
 	type Capability,
 	type ConnectionInfo,
@@ -15,7 +16,7 @@ import {
 } from './mcp-client.js';
 import { spawnPager } from './pager.js';
 import { enumerateResultLines, serializeResultForPager } from './result-view.js';
-import { computeScrollWindow } from './scroll-window.js';
+import { computeScrollWindow, type ScrollWindow } from './scroll-window.js';
 import { Spinner } from './spinner.js';
 
 const MIN_COLUMNS = 80;
@@ -578,18 +579,27 @@ export function App({ path, env }: AppProps): React.ReactElement {
 			const focusedRow = rows[Math.min(ctx.focusedFieldIndex, rows.length - 1)];
 			if (!focusedRow) return;
 
-			if (key.tab) {
+			// ← / → in Form mode are silent no-ops (design-spec §5.1) — the form
+			// owns focus, and pane movement would drop unsent input silently. The
+			// user must press `esc` first.
+			if (key.leftArrow || key.rightArrow) return;
+
+			// tab / shift-tab → next / prev field. ↑ / ↓ alias shift-tab / tab so
+			// arrow-key users can navigate fields without switching to tab keys
+			// (design-spec §5.1, PRD #19).
+			if (key.tab || key.upArrow || key.downArrow) {
 				if (rows.length <= 1) return;
-				const delta = key.shift ? -1 : 1;
+				const goingBack = key.upArrow || (key.tab && key.shift);
+				const delta = goingBack ? -1 : 1;
 				const next = (ctx.focusedFieldIndex + delta + rows.length) % rows.length;
 				setRightMode({ kind: 'form', ctx: { ...ctx, focusedFieldIndex: next } });
 				return;
 			}
 
-			// ↑ on an empty focused field → recall the last-invoked args for THIS
-			// tool. Non-empty fields ignore ↑ so we never overwrite user input.
-			// (design-spec §4.2)
-			if (key.upArrow) {
+			// ctrl+r on an empty focused field → recall the last-invoked args for
+			// THIS tool (design-spec §4.2). Relocated from ↑ (PRD #19) so ↑ can
+			// mean "prev field" consistently with the rest of the app.
+			if (key.ctrl && input === 'r') {
 				if (!isFocusedFieldEmpty(focusedRow, ctx.state)) return;
 				const last = lastInvocationRef.current;
 				if (!last || last.tool !== ctx.tool.name) return;
@@ -876,6 +886,47 @@ export function App({ path, env }: AppProps): React.ReactElement {
 		previousScrollTop: resultScroll,
 	});
 
+	// design-spec §2.5: form pane locks to a fixed height too. viewportHeight
+	// subtracts the tool-title row (always visible atop FormBody) and the
+	// spinner/disconnected footer (present in Invoking or disconnected states).
+	const formCtx = rightMode.kind === 'form' || rightMode.kind === 'invoking' ? rightMode.ctx : null;
+	const formHasFooter =
+		rightMode.kind === 'invoking' ||
+		(connState.kind === 'error' && connState.error.kind === 'disconnected');
+	const formViewport = Math.max(1, rightViewport - 1 - (formHasFooter ? 1 : 0));
+	const formScrollWin: ScrollWindow = useMemo(() => {
+		if (!formCtx || formCtx.spec.fields.length === 0) {
+			return {
+				startIndex: 0,
+				endIndex: 0,
+				scrollTop: 0,
+				topHidden: 0,
+				bottomHidden: 0,
+			};
+		}
+		// The flat-row anchor is the focused field's field-input row. When a
+		// focus-row lives inside a nested object, `path[0]` still names the
+		// top-level field it belongs to, which is what the flattener anchors on.
+		const focusRows = focusRowsForSpec(formCtx.spec, formCtx.state);
+		const focusedFocusRow = focusRows[Math.min(formCtx.focusedFieldIndex, focusRows.length - 1)];
+		const topLevelPath = focusedFocusRow?.field.path[0];
+		const topLevelFieldIndex = topLevelPath
+			? Math.max(
+					0,
+					formCtx.spec.fields.findIndex((f) => f.path[0] === topLevelPath),
+				)
+			: 0;
+		const flat = flattenForm(formCtx.spec, formCtx.state, topLevelFieldIndex, {
+			errors: formCtx.errors,
+		});
+		return computeScrollWindow({
+			totalRows: flat.rows.length,
+			focusedIndex: flat.focusedRowIndex,
+			viewportHeight: formViewport,
+			previousScrollTop: 0,
+		});
+	}, [formCtx, formViewport]);
+
 	// design-spec §2.3: below 80×24 we replace the layout with a single-line
 	// gate. State stays mounted (App itself doesn't unmount), so focus /
 	// selection are preserved when the terminal grows back.
@@ -909,6 +960,7 @@ export function App({ path, env }: AppProps): React.ReactElement {
 					rightMode={rightMode}
 					resultLines={resultLines}
 					resultScrollWin={resultScrollWin}
+					formScrollWin={formScrollWin}
 					terminalRows={rows}
 					connState={connState}
 					env={uiEnv}
@@ -1157,6 +1209,7 @@ function DetailPane({
 	rightMode,
 	resultLines,
 	resultScrollWin,
+	formScrollWin,
 	terminalRows,
 	connState,
 	env,
@@ -1164,10 +1217,11 @@ function DetailPane({
 	focused: boolean;
 	selected: Capability | undefined;
 	previewLines: React.ReactNode[];
-	previewScrollWin: ReturnType<typeof computeScrollWindow>;
+	previewScrollWin: ScrollWindow;
 	rightMode: RightMode;
 	resultLines: React.ReactNode[];
-	resultScrollWin: ReturnType<typeof computeScrollWindow>;
+	resultScrollWin: ScrollWindow;
+	formScrollWin: ScrollWindow;
 	terminalRows: number;
 	connState: ConnectionState;
 	env: UiEnv;
@@ -1188,12 +1242,16 @@ function DetailPane({
 	const paneHeight = Math.max(3, terminalRows - 1);
 	const previewVisible = previewLines.slice(previewScrollWin.startIndex, previewScrollWin.endIndex);
 	const resultVisible = resultLines.slice(resultScrollWin.startIndex, resultScrollWin.endIndex);
-	// Only render scroll indicators for modes wired through scroll-window this
-	// slice (Preview + Result). Form / Invoking keep their existing rendering
-	// until #24 adds the flattener + indicator wiring.
-	const showScrollIndicators =
-		!initializeErrored && (rightMode.kind === 'preview' || rightMode.kind === 'result');
-	const activeScrollWin = rightMode.kind === 'result' ? resultScrollWin : previewScrollWin;
+	// design-spec §2.6: scroll-indicator rows are always reserved (blank when
+	// N=0) so scrolling never causes a 1-row layout jump. Preview / Form /
+	// Invoking / Result all render through the same indicator wiring now.
+	const showScrollIndicators = !initializeErrored;
+	const activeScrollWin =
+		rightMode.kind === 'result'
+			? resultScrollWin
+			: rightMode.kind === 'form' || rightMode.kind === 'invoking'
+				? formScrollWin
+				: previewScrollWin;
 	return (
 		<Box
 			borderStyle={borderStyleFor(env, focused)}
@@ -1222,6 +1280,7 @@ function DetailPane({
 					invoking={rightMode.kind === 'invoking'}
 					disconnected={disconnected}
 					env={env}
+					scrollWin={formScrollWin}
 				/>
 			)}
 			{!initializeErrored && rightMode.kind === 'result' && resultVisible}
@@ -1303,11 +1362,13 @@ function FormBody({
 	invoking,
 	disconnected,
 	env,
+	scrollWin,
 }: {
 	ctx: FormCtx;
 	invoking: boolean;
 	disconnected: boolean;
 	env: UiEnv;
+	scrollWin: ScrollWindow;
 }): React.ReactElement {
 	// design-spec §3.4: server-crash form-disabled state renders the same as
 	// invoking (fields dim, no cursor) but with the explicit disconnected footer.
@@ -1332,30 +1393,27 @@ function FormBody({
 	const errorByPath = new Map<string, string>();
 	for (const e of ctx.errors) errorByPath.set(e.path.join('.'), e.message);
 
-	const rows = focusRowsForSpec(ctx.spec, ctx.state);
-	const focusedRowIndex = Math.min(ctx.focusedFieldIndex, rows.length - 1);
-	// Build a set of (field-path, focus-index) so nested renderers can look up
-	// focus state without threading indices through every recursion level.
-	const focusIndexByRowKey = new Map<string, number>();
-	for (let idx = 0; idx < rows.length; idx++) {
-		const row = rows[idx];
-		if (row) focusIndexByRowKey.set(rowKey(row), idx);
-	}
+	const focusRows = focusRowsForSpec(ctx.spec, ctx.state);
+	const focusedFocusRow = focusRows[Math.min(ctx.focusedFieldIndex, focusRows.length - 1)] ?? null;
 
-	const rowProps: RowProps = {
+	// design-spec §2.5 + engineering-spec §2.7: render every visible form row as
+	// a single ink Text element, in the same order form-row-flattener enumerates.
+	// The parent Box (flexDirection="column") makes each element consume exactly
+	// one terminal row, so the scroll-window slice matches the visible frame
+	// row-for-row.
+	const rendered = renderFlatFormRows({
+		spec: ctx.spec,
 		state: ctx.state,
 		errorByPath,
-		focusedIndex: focusedRowIndex,
-		focusIndexByRowKey,
-		invoking: locked,
-	};
+		focusedFocusRow,
+		locked,
+	});
+	const visible = rendered.slice(scrollWin.startIndex, scrollWin.endIndex);
 
 	return (
 		<Box flexDirection="column">
 			<Text bold>{ctx.tool.name}</Text>
-			{ctx.spec.fields.map((field) => (
-				<FieldTree key={field.path.join('.')} field={field} depth={0} rowProps={rowProps} />
-			))}
+			{visible}
 			{invoking && !disconnected && (
 				<Box flexDirection="row">
 					<Spinner env={env} />
@@ -1374,285 +1432,212 @@ function FormBody({
 	);
 }
 
-function rowKey(row: FocusRow): string {
-	if (row.kind === 'array-item') return `array-item:${row.field.path.join('.')}:${row.index}`;
-	if (row.kind === 'array-add') return `array-add:${row.field.path.join('.')}`;
-	if (row.kind === 'raw-json') return `raw-json:${row.field.path.join('.')}`;
-	return `primitive:${row.field.path.join('.')}`;
-}
-
-type RowProps = {
-	state: FormState;
-	errorByPath: Map<string, string>;
-	focusedIndex: number;
-	focusIndexByRowKey: Map<string, number>;
-	invoking: boolean;
-};
-
 function indent(depth: number): string {
 	return '  '.repeat(depth);
 }
 
-function FieldTree({
-	field,
-	depth,
-	rowProps,
-}: {
-	field: FormField;
-	depth: number;
-	rowProps: RowProps;
-}): React.ReactElement {
+type FlatRowRenderInput = {
+	spec: FormSpec;
+	state: FormState;
+	errorByPath: Map<string, string>;
+	focusedFocusRow: FocusRow | null;
+	locked: boolean;
+};
+
+// Walks `spec` in the same order as `flattenForm` and emits one Ink node per
+// visible row. Keeping the walk order aligned by construction is the invariant
+// that lets scroll-window slice this list correctly.
+function renderFlatFormRows(input: FlatRowRenderInput): React.ReactNode[] {
+	const out: React.ReactNode[] = [];
+	for (const field of input.spec.fields) {
+		walkFieldForRender(field, 0, input, out);
+	}
+	return out;
+}
+
+function walkFieldForRender(
+	field: FormField,
+	depth: number,
+	input: FlatRowRenderInput,
+	out: React.ReactNode[],
+): void {
 	const kind = field.fieldKind;
+	const key = field.path.join('.');
+	const errMsg = input.errorByPath.get(key);
+	const hasError = errMsg !== undefined;
 	const requiredMark = field.required ? '*' : '';
-	const stateKey = field.path.join('.');
-	const errorMessage = rowProps.errorByPath.get(stateKey);
 
 	if (kind.kind === 'object') {
-		return (
-			<Box flexDirection="column">
-				<Text>
-					{indent(depth)}
-					<Text bold>
-						{field.label}
-						{requiredMark}
-					</Text>
-					<Text dimColor> (object)</Text>
+		out.push(
+			<Text key={`hdr:${key}`}>
+				{indent(depth)}
+				<Text bold>
+					{field.label}
+					{requiredMark}
 				</Text>
-				{kind.fields.map((child) => (
-					<FieldTree
-						key={child.path.join('.')}
-						field={child}
-						depth={depth + 1}
-						rowProps={rowProps}
-					/>
-				))}
-			</Box>
+				<Text dimColor> (object)</Text>
+			</Text>,
 		);
+		for (const child of kind.fields) walkFieldForRender(child, depth + 1, input, out);
+		return;
 	}
 
 	if (kind.kind === 'array-of-primitives') {
-		const items = readArray(rowProps.state, stateKey);
-		return (
-			<Box flexDirection="column">
-				<Text>
-					{indent(depth)}
-					<Text bold>
-						{field.label}
-						{requiredMark}
-					</Text>
-					<Text dimColor> (array&lt;{kind.itemKind}&gt;)</Text>
+		out.push(
+			<Text key={`lbl:${key}`}>
+				{indent(depth)}
+				<Text bold>
+					{field.label}
+					{requiredMark}
 				</Text>
-				{items.map((value, i) => {
-					const key = `array-item:${stateKey}:${i}`;
-					const rowIdx = rowProps.focusIndexByRowKey.get(key) ?? -1;
-					const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
-					return (
-						<ArrayItemRow
-							key={key}
-							depth={depth + 1}
-							index={i}
-							value={value}
-							focused={focused}
-							disabled={rowProps.invoking}
-						/>
-					);
-				})}
-				<AddRowAffordance
-					depth={depth + 1}
-					focused={
-						(rowProps.focusIndexByRowKey.get(`array-add:${stateKey}`) ?? -1) ===
-							rowProps.focusedIndex && !rowProps.invoking
-					}
-				/>
-				{errorMessage !== undefined && (
-					<Text color="red">
-						{indent(depth + 1)}error: {errorMessage}
-					</Text>
-				)}
-			</Box>
+				<Text dimColor> (array&lt;{kind.itemKind}&gt;)</Text>
+			</Text>,
 		);
+		const items = readArray(input.state, key);
+		for (let i = 0; i < items.length; i++) {
+			const focused =
+				!input.locked &&
+				input.focusedFocusRow?.kind === 'array-item' &&
+				input.focusedFocusRow.field.path.join('.') === key &&
+				input.focusedFocusRow.index === i;
+			const value = items[i] ?? '';
+			const cursor = focused ? '▎' : '';
+			const displayValue = value.length === 0 && !focused ? ' ' : value;
+			out.push(
+				<Box key={`item:${key}:${i}`} flexDirection="row">
+					<Text>{indent(depth + 1)}</Text>
+					<Text inverse={focused} bold={focused}>
+						[{i}]
+					</Text>
+					<Text>: </Text>
+					<Text dimColor={input.locked}>
+						{displayValue}
+						{cursor}
+					</Text>
+				</Box>,
+			);
+		}
+		const addFocused =
+			!input.locked &&
+			input.focusedFocusRow?.kind === 'array-add' &&
+			input.focusedFocusRow.field.path.join('.') === key;
+		out.push(
+			<Box key={`add:${key}`} flexDirection="row">
+				<Text>{indent(depth + 1)}</Text>
+				<Text dimColor inverse={addFocused} bold={addFocused}>
+					[+ add row — enter to append]
+				</Text>
+			</Box>,
+		);
+		if (hasError) {
+			out.push(
+				<Text key={`err:${key}`} color="red">
+					{indent(depth + 1)}error: {errMsg}
+				</Text>,
+			);
+		} else if (field.description) {
+			out.push(
+				<Text key={`desc:${key}`} dimColor>
+					{indent(depth + 1)}
+					{field.description}
+				</Text>,
+			);
+		}
+		return;
 	}
 
 	if (kind.kind === 'raw-json') {
-		const value =
-			typeof rowProps.state[stateKey] === 'string' ? (rowProps.state[stateKey] as string) : '';
-		const rowIdx = rowProps.focusIndexByRowKey.get(`raw-json:${stateKey}`) ?? -1;
-		const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
-		return (
-			<RawJsonRow
-				field={field}
-				reason={kind.reason}
-				value={value}
-				depth={depth}
-				focused={focused}
-				disabled={rowProps.invoking}
-				errorMessage={errorMessage}
-			/>
-		);
-	}
-
-	// Primitive (string / number / boolean / enum).
-	const value =
-		typeof rowProps.state[stateKey] === 'string' ? (rowProps.state[stateKey] as string) : '';
-	const rowIdx = rowProps.focusIndexByRowKey.get(`primitive:${stateKey}`) ?? -1;
-	const focused = rowIdx === rowProps.focusedIndex && !rowProps.invoking;
-	return (
-		<PrimitiveRow
-			field={field}
-			value={value}
-			depth={depth}
-			focused={focused}
-			disabled={rowProps.invoking}
-			errorMessage={errorMessage}
-		/>
-	);
-}
-
-function PrimitiveRow({
-	field,
-	value,
-	depth,
-	focused,
-	disabled,
-	errorMessage,
-}: {
-	field: FormField;
-	value: string;
-	depth: number;
-	focused: boolean;
-	disabled: boolean;
-	errorMessage?: string;
-}): React.ReactElement {
-	const requiredMark = field.required ? '*' : '';
-	const hint = primitiveHint(field.fieldKind);
-	const hasError = errorMessage !== undefined;
-	const labelColor = hasError ? 'red' : undefined;
-	const inputColor = hasError ? 'red' : undefined;
-	const cursor = focused && !disabled ? '▎' : '';
-	const displayValue = value.length === 0 && !focused ? ' ' : value;
-	return (
-		<Box flexDirection="column">
-			<Box flexDirection="row">
+		const focused =
+			!input.locked &&
+			input.focusedFocusRow?.kind === 'raw-json' &&
+			input.focusedFocusRow.field.path.join('.') === key;
+		const value = typeof input.state[key] === 'string' ? (input.state[key] as string) : '';
+		const cursor = focused ? '▎' : '';
+		const displayValue = value.length === 0 && !focused ? ' ' : value;
+		const labelColor = hasError ? 'red' : undefined;
+		const inputColor = hasError ? 'red' : undefined;
+		out.push(
+			<Box key={`lbl:${key}`} flexDirection="row">
 				<Text>{indent(depth)}</Text>
 				<Text color={labelColor} inverse={focused} bold={focused}>
 					{field.label}
 					{requiredMark}
 				</Text>
-				<Text> ({hint}): </Text>
-				<Text color={inputColor} dimColor={disabled}>
+				<Text dimColor> (raw JSON — {kind.reason})</Text>
+			</Box>,
+		);
+		out.push(
+			<Box key={`in:${key}`} flexDirection="row">
+				<Text>{indent(depth + 1)}</Text>
+				<Text color={inputColor} dimColor={input.locked}>
 					{displayValue}
 					{cursor}
 				</Text>
-			</Box>
-			{hasError && (
-				<Text color="red">
-					{indent(depth + 1)}error: {errorMessage}
-				</Text>
-			)}
-			{field.description && !hasError && (
-				<Text dimColor>
+			</Box>,
+		);
+		if (hasError) {
+			out.push(
+				<Text key={`err:${key}`} color="red">
+					{indent(depth + 1)}error: {errMsg}
+				</Text>,
+			);
+		} else if (field.description) {
+			out.push(
+				<Text key={`desc:${key}`} dimColor>
 					{indent(depth + 1)}
 					{field.description}
-				</Text>
-			)}
-		</Box>
-	);
-}
+				</Text>,
+			);
+		}
+		return;
+	}
 
-function RawJsonRow({
-	field,
-	reason,
-	value,
-	depth,
-	focused,
-	disabled,
-	errorMessage,
-}: {
-	field: FormField;
-	reason: 'array-of-objects' | 'oneOf' | 'anyOf' | 'ref' | 'binary' | 'open-object';
-	value: string;
-	depth: number;
-	focused: boolean;
-	disabled: boolean;
-	errorMessage?: string;
-}): React.ReactElement {
-	const requiredMark = field.required ? '*' : '';
-	const hasError = errorMessage !== undefined;
+	// Primitive (string / number / boolean / enum). design-spec §3.4: focused
+	// field renders reverse-video label + cursor in input; error paints both
+	// label and input red so the state is distinguishable without color too.
+	const focused =
+		!input.locked &&
+		input.focusedFocusRow?.kind === 'primitive' &&
+		input.focusedFocusRow.field.path.join('.') === key;
+	const value = typeof input.state[key] === 'string' ? (input.state[key] as string) : '';
+	const cursor = focused ? '▎' : '';
+	const displayValue = value.length === 0 && !focused ? ' ' : value;
+	const hint = primitiveHint(field.fieldKind);
 	const labelColor = hasError ? 'red' : undefined;
 	const inputColor = hasError ? 'red' : undefined;
-	const cursor = focused && !disabled ? '▎' : '';
-	const displayValue = value.length === 0 && !focused ? ' ' : value;
-	return (
-		<Box flexDirection="column">
-			<Box flexDirection="row">
-				<Text>{indent(depth)}</Text>
-				<Text color={labelColor} inverse={focused} bold={focused}>
-					{field.label}
-					{requiredMark}
-				</Text>
-				<Text dimColor> (raw JSON — {reason})</Text>
-			</Box>
-			<Box flexDirection="row">
-				<Text>{indent(depth + 1)}</Text>
-				<Text color={inputColor} dimColor={disabled}>
-					{displayValue}
-					{cursor}
-				</Text>
-			</Box>
-			{hasError && (
-				<Text color="red">
-					{indent(depth + 1)}error: {errorMessage}
-				</Text>
-			)}
-		</Box>
-	);
-}
-
-function ArrayItemRow({
-	depth,
-	index,
-	value,
-	focused,
-	disabled,
-}: {
-	depth: number;
-	index: number;
-	value: string;
-	focused: boolean;
-	disabled: boolean;
-}): React.ReactElement {
-	const cursor = focused && !disabled ? '▎' : '';
-	const displayValue = value.length === 0 && !focused ? ' ' : value;
-	return (
-		<Box flexDirection="row">
+	out.push(
+		<Box key={`lbl:${key}`} flexDirection="row">
 			<Text>{indent(depth)}</Text>
-			<Text inverse={focused} bold={focused}>
-				[{index}]
+			<Text color={labelColor} inverse={focused} bold={focused}>
+				{field.label}
+				{requiredMark}
 			</Text>
-			<Text>: </Text>
-			<Text dimColor={disabled}>
+			<Text> ({hint}):</Text>
+		</Box>,
+	);
+	out.push(
+		<Box key={`in:${key}`} flexDirection="row">
+			<Text>{indent(depth + 1)}</Text>
+			<Text color={inputColor} dimColor={input.locked}>
 				{displayValue}
 				{cursor}
 			</Text>
-		</Box>
+		</Box>,
 	);
-}
-
-function AddRowAffordance({
-	depth,
-	focused,
-}: {
-	depth: number;
-	focused: boolean;
-}): React.ReactElement {
-	return (
-		<Box flexDirection="row">
-			<Text>{indent(depth)}</Text>
-			<Text dimColor inverse={focused} bold={focused}>
-				[+ add row — enter to append]
-			</Text>
-		</Box>
-	);
+	if (hasError) {
+		out.push(
+			<Text key={`err:${key}`} color="red">
+				{indent(depth + 1)}error: {errMsg}
+			</Text>,
+		);
+	} else if (field.description) {
+		out.push(
+			<Text key={`desc:${key}`} dimColor>
+				{indent(depth + 1)}
+				{field.description}
+			</Text>,
+		);
+	}
 }
 
 function StatusBar({
@@ -1670,10 +1655,11 @@ function StatusBar({
 	// hints also degrade to plain-ASCII when ARGUS_ASCII=1.
 	const leftRight = env.ascii ? '</>' : '←/→';
 	const upDown = env.ascii ? '^/v' : '↑/↓';
-	const upArrow = env.ascii ? '^' : '↑';
 	let hints: string;
 	if (rightMode.kind === 'form' || rightMode.kind === 'invoking') {
-		hints = `tab/shift-tab fields  enter submit  esc cancel  ${upArrow} last args  q quit`;
+		// design-spec §3.6 (PRD #19): recall gesture moved to ctrl+r so ↑/↓
+		// alias shift-tab/tab uniformly with the rest of the app.
+		hints = 'tab/shift-tab fields  enter submit  esc cancel  ctrl+r last args  q quit';
 	} else if (rightMode.kind === 'result') {
 		// design-spec §3.6: arrows + tab are the discoverable path; vim keys
 		// (j/k) and `h back` still work but are not advertised. `s swap` is not

@@ -217,6 +217,89 @@ describe('app-shell — right-pane stable frame + internal scroll (Preview + Res
 		expect(instance?.lastFrame() ?? '').not.toContain('[text]');
 	});
 
+	// PRD #19 / issue #24 form-mode stable frame.
+	it('form: long form scrolls internally; ↓ N indicator visible on entry, 0 hidden above', async () => {
+		instance = renderWithStdio(React.createElement(App, { path: MANY_FIELDS_ENTRY }), {
+			columns: 80,
+			rows: 24,
+		});
+		// Wait for tools/list to complete — the tool description confirms the
+		// tool is in the middle pane (matching just "many-fields" would race with
+		// the truncated Connection-pane path shown during the connecting state).
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('A tool with many fields'));
+
+		// Enter form for the many-fields tool.
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		const frame = instance.lastFrame() ?? '';
+		// Flat form rows: 25 fields × 2 (label + input) = 50 rows.
+		// formViewport = rightViewport (18) − 1 (tool title) = 17. bottomHidden = 33.
+		expect(frame).toMatch(/↓ 33\b/);
+		// Fresh mount — nothing hidden above yet.
+		expect(frame).not.toMatch(/↑ [1-9]/);
+		expect(frame).toContain('field_00');
+	});
+
+	it('form: tabbing past the visible window scrolls the form; ↑ N appears', async () => {
+		instance = renderWithStdio(React.createElement(App, { path: MANY_FIELDS_ENTRY }), {
+			columns: 80,
+			rows: 24,
+		});
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('A tool with many fields'));
+
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		// Field 0's input row is at flat-row 1. Tab moves focus one focus-row at a
+		// time; each string field contributes one focus-row (the primitive input).
+		// Tab 10 times → focus is on field 10 (input row 21 in the flat list).
+		// scrollTop = 21 − 17 + 1 = 5. topHidden = 5, bottomHidden = 50 − 22 = 28.
+		for (let i = 0; i < 10; i++) await pressKey(instance, TAB);
+
+		const frame = instance.lastFrame() ?? '';
+		expect(frame).toMatch(/↑ 5\b/);
+		expect(frame).toMatch(/↓ 28\b/);
+		expect(frame).toContain('field_10');
+		expect(frame).not.toContain('field_00');
+	});
+
+	it('form: ↑ / ↓ arrow keys drive the same field-nav scroll as tab / shift-tab', async () => {
+		instance = renderWithStdio(React.createElement(App, { path: MANY_FIELDS_ENTRY }), {
+			columns: 80,
+			rows: 24,
+		});
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('A tool with many fields'));
+
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		// ↓ aliases tab. Ten ↓ presses match the tab test above.
+		for (let i = 0; i < 10; i++) await pressKey(instance, DOWN);
+
+		const frame = instance.lastFrame() ?? '';
+		expect(frame).toMatch(/↑ 5\b/);
+		expect(frame).toMatch(/↓ 28\b/);
+	});
+
+	it('form: ARGUS_ASCII=1 falls back to ^ N / v N in Form indicators', async () => {
+		instance = renderWithStdio(
+			React.createElement(App, {
+				path: MANY_FIELDS_ENTRY,
+				env: { ARGUS_ASCII: '1' },
+			}),
+			{ columns: 80, rows: 24 },
+		);
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('A tool with many fields'));
+
+		await pressKey(instance, '\r');
+		await waitFor(() => (instance?.lastFrame() ?? '').includes('Form'));
+
+		const frame = instance.lastFrame() ?? '';
+		expect(frame).toMatch(/v 33\b/);
+		expect(frame).not.toContain('↓');
+	});
+
 	it('result status-bar hint matches design-spec §3.6', async () => {
 		instance = renderWithStdio(React.createElement(App, { path: FIXTURE_ENTRY }), {
 			columns: 80,
